@@ -1,0 +1,658 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "ProgrammerWorker.h"
+
+#include <QByteArray>
+#include <QString>
+#include <cstring>
+#include <vector>
+
+extern "C" {
+#include "database.h"
+#include "minipro.h"
+}
+
+namespace {
+QString modelName(int version)
+{
+    switch (version) {
+    case MP_TL866A:      return "TL866A";
+    case MP_TL866CS:     return "TL866CS";
+    case MP_TL866IIPLUS: return "TL866II+";
+    case MP_T56:         return "T56";
+    case MP_T48:         return "T48";
+    case MP_T76:         return "T76";
+    default:             return QString("unknown(%1)").arg(version);
+    }
+}
+}  // namespace
+
+ProgrammerWorker::ProgrammerWorker(QObject *parent) : QObject(parent)
+{
+    // minipro's per-action C functions read settings off handle->cmdopts.
+    // We allocate one zero-initialized struct (safe defaults for every flag)
+    // and bind it to the handle once we open it.
+    m_cmdopts = static_cast<cmdopts_t *>(calloc(1, sizeof(cmdopts_t)));
+}
+
+ProgrammerWorker::~ProgrammerWorker()
+{
+    closeHandle();
+    free(m_cmdopts);
+    m_cmdopts = nullptr;
+}
+
+void ProgrammerWorker::closeHandle()
+{
+    if (!m_handle)
+        return;
+    if (m_handle->device) {
+        free(m_handle->device);  // get_device_by_name allocates with malloc
+        m_handle->device = nullptr;
+    }
+    m_handle->cmdopts = nullptr;  // don't let minipro_close free our struct
+    minipro_close(m_handle);
+    m_handle = nullptr;
+    m_currentChip.clear();
+}
+
+void ProgrammerWorker::detect()
+{
+    closeHandle();
+    m_handle = minipro_open(NO_VERBOSE);
+    if (!m_handle) {
+        emit detectionFailed(
+            "No programmer detected. Plug in the device and ensure udev rules "
+            "are installed (third_party/minipro/udev/).");
+        return;
+    }
+    m_handle->cmdopts = m_cmdopts;  // safe-default cmdopts for tx code paths
+
+    DeviceInfo info;
+    info.connected = true;
+    info.versionId = m_handle->version;
+    info.model = modelName(m_handle->version);
+    info.firmwareStr = QString::fromUtf8(m_handle->firmware_str);
+    info.deviceCode = QString::fromUtf8(m_handle->device_code);
+    emit detected(info);
+}
+
+void ProgrammerWorker::openChip(const QString &miniproName)
+{
+    if (!m_handle) {
+        emit chipOpenFailed("Programmer not connected");
+        return;
+    }
+    if (m_handle->device) {
+        free(m_handle->device);
+        m_handle->device = nullptr;
+    }
+
+    db_data_t db{};
+    const QByteArray nameUtf8 = miniproName.toUtf8();
+    const QByteArray infoicUtf8 = m_infoicPath.toUtf8();
+    const QByteArray logicicUtf8 = m_logicicPath.toUtf8();
+    db.device_name = nameUtf8.constData();
+    db.infoic_path = m_infoicPath.isEmpty() ? nullptr : infoicUtf8.constData();
+    db.logicic_path = m_logicicPath.isEmpty() ? nullptr : logicicUtf8.constData();
+    db.prog_version = m_handle->version;
+
+    device_t *dev = get_device_by_name(&db);
+    if (!dev) {
+        emit chipOpenFailed(QString("Chip '%1' not found in minipro database for %2")
+                                .arg(miniproName, modelName(m_handle->version)));
+        return;
+    }
+    m_handle->device = dev;
+    m_currentChip = miniproName;
+    emit chipOpened(miniproName, dev->code_memory_size, dev->data_memory_size,
+                    static_cast<bool>(dev->flags.can_erase));
+}
+
+void ProgrammerWorker::readCode()
+{
+    m_cancel.store(false);
+
+    if (!m_handle || !m_handle->device) {
+        emit error("No chip selected. Pick a chip first.");
+        return;
+    }
+    device_t *dev = m_handle->device;
+    const quint32 total = dev->code_memory_size;
+    if (total == 0) {
+        emit error("Chip reports zero code memory size.");
+        return;
+    }
+    const quint32 blockSize = dev->read_buffer_size
+                                  ? dev->read_buffer_size
+                                  : 64;
+
+    std::vector<uint8_t> buf(total, 0xFF);
+
+    if (m_handle->minipro_begin_transaction
+        && m_handle->minipro_begin_transaction(m_handle)) {
+        emit error("begin_transaction failed");
+        return;
+    }
+
+    data_set_t ds{};
+    ds.data = buf.data();
+    ds.type = MP_CODE;
+    ds.size = blockSize;
+    ds.init = 1;
+    ds.block_count = (total + blockSize - 1) / blockSize;
+
+    const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
+    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+
+    bool ok = true;
+    QString errMsg;
+    qint64 done = 0;
+    emit progress(0, total);
+
+    for (uint32_t i = 0; i < ds.block_count; ++i) {
+        if (m_cancel.load()) {
+            errMsg = "Read cancelled";
+            ok = false;
+            break;
+        }
+        ds.address = i * blockSize + offset;
+        if (wordOrg)
+            ds.address >>= 1;
+        const int rc = m_handle->minipro_read_block
+                           ? m_handle->minipro_read_block(m_handle, &ds)
+                           : -1;
+        if (rc) {
+            ok = false;
+            errMsg = QString("read_block failed at offset 0x%1")
+                         .arg(i * blockSize, 0, 16);
+            break;
+        }
+        ds.data += ds.size;
+        ds.init = 0;
+        done += ds.size;
+        emit progress(qMin<qint64>(done, total), total);
+    }
+
+    if (m_handle->minipro_end_transaction)
+        m_handle->minipro_end_transaction(m_handle);
+
+    ReadResult r;
+    r.ok = ok;
+    r.area = "code";
+    if (ok)
+        r.data = QByteArray(reinterpret_cast<const char *>(buf.data()),
+                            static_cast<qsizetype>(total));
+    else
+        r.errorMessage = errMsg;
+    emit readFinished(r);
+}
+
+void ProgrammerWorker::verifyCode(const QByteArray &expected)
+{
+    m_cancel.store(false);
+
+    VerifyResult v;
+    v.area = "code";
+
+    if (!m_handle || !m_handle->device) {
+        v.errorMessage = "No chip selected. Pick a chip first.";
+        emit verifyFinished(v);
+        return;
+    }
+    device_t *dev = m_handle->device;
+    const quint32 total = dev->code_memory_size;
+    if (total == 0) {
+        v.errorMessage = "Chip reports zero code memory size.";
+        emit verifyFinished(v);
+        return;
+    }
+    if (static_cast<quint32>(expected.size()) != total) {
+        v.errorMessage = QString(
+            "Buffer size %1 bytes does not match chip code memory %2 bytes. "
+            "Resize the buffer or reload a matching file before verifying.")
+                             .arg(expected.size()).arg(total);
+        emit verifyFinished(v);
+        return;
+    }
+    const quint32 blockSize = dev->read_buffer_size ? dev->read_buffer_size : 64;
+    std::vector<uint8_t> buf(blockSize, 0xFF);
+
+    if (m_handle->minipro_begin_transaction
+        && m_handle->minipro_begin_transaction(m_handle)) {
+        v.errorMessage = "begin_transaction failed";
+        emit verifyFinished(v);
+        return;
+    }
+
+    data_set_t ds{};
+    ds.data = buf.data();
+    ds.type = MP_CODE;
+    ds.size = blockSize;
+    ds.init = 1;
+    ds.block_count = (total + blockSize - 1) / blockSize;
+
+    const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
+    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+
+    bool ioOk = true;
+    qint64 done = 0;
+    emit progress(0, total);
+
+    const auto *expectedPtr = reinterpret_cast<const uint8_t *>(expected.constData());
+
+    for (uint32_t i = 0; i < ds.block_count; ++i) {
+        if (m_cancel.load()) {
+            v.errorMessage = "Verify cancelled";
+            ioOk = false;
+            break;
+        }
+        const quint32 blockByteOffset = i * blockSize;
+        ds.address = blockByteOffset + offset;
+        if (wordOrg)
+            ds.address >>= 1;
+        const int rc = m_handle->minipro_read_block
+                           ? m_handle->minipro_read_block(m_handle, &ds)
+                           : -1;
+        if (rc) {
+            v.errorMessage = QString("read_block failed at offset 0x%1")
+                                 .arg(blockByteOffset, 0, 16);
+            ioOk = false;
+            break;
+        }
+
+        const quint32 thisLen = qMin<quint32>(blockSize, total - blockByteOffset);
+        for (quint32 j = 0; j < thisLen; ++j) {
+            const quint32 off = blockByteOffset + j;
+            if (buf[j] != expectedPtr[off]) {
+                if (v.firstMismatchOffset < 0) {
+                    v.firstMismatchOffset = off;
+                    v.firstChipByte = buf[j];
+                    v.firstExpectedByte = expectedPtr[off];
+                }
+                ++v.mismatches;
+            }
+            ++v.bytesChecked;
+        }
+
+        ds.init = 0;
+        done += thisLen;
+        emit progress(qMin<qint64>(done, total), total);
+    }
+
+    if (m_handle->minipro_end_transaction)
+        m_handle->minipro_end_transaction(m_handle);
+
+    if (!ioOk) {
+        emit verifyFinished(v);
+        return;
+    }
+    v.ok = (v.mismatches == 0);
+    emit verifyFinished(v);
+}
+
+namespace {
+// Read the first ≤64 bytes of code memory in an already-open transaction.
+// Returns true if the read succeeded; sets *allFF accordingly.
+bool probeFirstBlockAllFF(minipro_handle_t *h, bool *allFF)
+{
+    *allFF = false;
+    device_t *dev = h->device;
+    const quint32 probeSize = qMin<quint32>(
+        dev->read_buffer_size ? dev->read_buffer_size : 64, 64);
+    std::vector<uint8_t> probe(probeSize, 0);
+    data_set_t ds{};
+    ds.data = probe.data();
+    ds.type = MP_CODE;
+    ds.size = probeSize;
+    ds.init = 1;
+    ds.block_count = 1;
+    ds.address = dev->flags.has_data_offset ? dev->page_size : 0;
+    if (dev->flags.data_org == MP_ORG_WORDS)
+        ds.address >>= 1;
+    if (!h->minipro_read_block || h->minipro_read_block(h, &ds) != 0)
+        return false;
+    bool ff = true;
+    for (quint32 i = 0; i < probeSize; ++i)
+        if (probe[i] != 0xFF) { ff = false; break; }
+    *allFF = ff;
+    return true;
+}
+}  // namespace
+
+void ProgrammerWorker::eraseChip(bool force)
+{
+    if (!m_handle || !m_handle->device) {
+        emit eraseFinished(false, "No chip selected.");
+        return;
+    }
+    device_t *dev = m_handle->device;
+    if (!dev->flags.can_erase) {
+        emit eraseFinished(false,
+            "This chip is not electrically erasable (UV EPROM, OTP, or "
+            "similar). Nothing was attempted.");
+        return;
+    }
+    if (!m_handle->minipro_begin_transaction
+        || !m_handle->minipro_end_transaction
+        || !m_handle->minipro_read_block) {
+        emit eraseFinished(false, "Programmer does not expose erase protocol.");
+        return;
+    }
+
+    // Mirror minipro CLI's erase_device(): different num_fuses / pld arg
+    // depending on chip family.
+    uint8_t num_fuses = 0;
+    uint8_t pld = 0;
+    if (dev->config) {
+        if (dev->chip_type == MP_PLD) {
+            const uint8_t v = m_handle->version;
+            if (v == MP_TL866IIPLUS || v == MP_T48 || v == MP_T56
+                || v == MP_T76) {
+                pld = (dev->protocol_id == IC2_ALG_GAL22) ? ERASE_PLD1
+                                                          : ERASE_PLD2;
+            }
+        } else {
+            auto *fuses = reinterpret_cast<fuse_decl_t *>(dev->config);
+            num_fuses = (fuses->num_fuses > 4) ? 1 : fuses->num_fuses;
+        }
+    }
+
+    if (m_handle->minipro_begin_transaction(m_handle)) {
+        emit eraseFinished(false, "begin_transaction failed");
+        return;
+    }
+
+    // Presence check: read the first block and refuse if it's all 0xFF.
+    // The T48 has no hardware "is chip seated" signal, so an empty socket
+    // floats high on most parts and reads as 0xFF — indistinguishable from
+    // a genuinely blank chip. Either way, erasing without warning is wrong.
+    if (!force && dev->code_memory_size > 0) {
+        bool allFF = false;
+        if (probeFirstBlockAllFF(m_handle, &allFF) && allFF) {
+            m_handle->minipro_end_transaction(m_handle);
+            emit eraseFinished(false,
+                "Pre-erase check: first block reads as all 0xFF — "
+                "either the chip is already blank, or no chip is "
+                "in the socket. Refusing to erase.\n\n"
+                "If you're sure the chip is seated and intentionally "
+                "want to issue the erase anyway, enable the Force "
+                "checkbox in the Erase dialog and try again.");
+            return;
+        }
+    }
+
+    const int rc = minipro_erase(m_handle, num_fuses, pld);
+    m_handle->minipro_end_transaction(m_handle);
+    if (rc) {
+        emit eraseFinished(false, "minipro_erase failed");
+        return;
+    }
+    emit eraseFinished(true, QString());
+}
+
+void ProgrammerWorker::detectChipId()
+{
+    ChipIdResult r;
+    if (!m_handle || !m_handle->device) {
+        r.status = ChipIdResult::Status::IoError;
+        r.errorMessage = "No chip selected.";
+        emit chipIdFinished(r);
+        return;
+    }
+    device_t *dev = m_handle->device;
+    if (!dev->flags.has_chip_id) {
+        r.status = ChipIdResult::Status::Unsupported;
+        emit chipIdFinished(r);
+        return;
+    }
+    if (!m_handle->minipro_begin_transaction
+        || !m_handle->minipro_get_chip_id
+        || !m_handle->minipro_end_transaction) {
+        r.status = ChipIdResult::Status::IoError;
+        r.errorMessage = "Programmer does not expose chip-ID protocol.";
+        emit chipIdFinished(r);
+        return;
+    }
+    if (m_handle->minipro_begin_transaction(m_handle)) {
+        r.status = ChipIdResult::Status::IoError;
+        r.errorMessage = "begin_transaction failed";
+        emit chipIdFinished(r);
+        return;
+    }
+    uint8_t idType = 0;
+    uint32_t readId = 0;
+    const int rc = m_handle->minipro_get_chip_id(m_handle, &idType, &readId);
+    m_handle->minipro_end_transaction(m_handle);
+    if (rc) {
+        r.status = ChipIdResult::Status::IoError;
+        r.errorMessage = "get_chip_id failed";
+        emit chipIdFinished(r);
+        return;
+    }
+    r.expectedId = dev->chip_id;
+    r.readId = readId;
+    r.idType = idType;
+    r.idBytesCount = dev->chip_id_bytes_count;
+
+    quint8 shift = 0;
+    bool match = false;
+    switch (idType) {
+    case MP_ID_TYPE1:
+    case MP_ID_TYPE2:
+    case MP_ID_TYPE5:
+        match = (readId == dev->chip_id);
+        break;
+    case MP_ID_TYPE3:
+        shift = 5;
+        match = ((dev->chip_id >> 5) == (readId >> 5));
+        r.revisionBits = 5;
+        break;
+    case MP_ID_TYPE4: {
+        auto *cfg = reinterpret_cast<fuse_decl_t *>(dev->config);
+        if (cfg) {
+            shift = cfg->rev_bits;
+            match = ((dev->chip_id >> shift) == (readId >> shift));
+            r.revisionBits = shift;
+        }
+        break;
+    }
+    default:
+        // Unknown id_type — surface as raw bytes; can't compare reliably.
+        match = (readId == dev->chip_id);
+        break;
+    }
+
+    if (match) {
+        r.status = ChipIdResult::Status::Match;
+    } else {
+        r.status = ChipIdResult::Status::Mismatch;
+        // Try to identify the chip from the read ID.
+        db_data_t db{};
+        const QByteArray ipath = m_infoicPath.toUtf8();
+        const QByteArray lpath = m_logicicPath.toUtf8();
+        db.infoic_path = m_infoicPath.isEmpty() ? nullptr : ipath.constData();
+        db.logicic_path = m_logicicPath.isEmpty() ? nullptr : lpath.constData();
+        db.prog_version = m_handle->version;
+        db.chip_id = (readId >> shift) << shift;
+        db.protocol = dev->protocol_id;
+        const char *name = get_device_from_id(&db);
+        if (name) {
+            r.identifiedAs = QString::fromUtf8(name);
+            free(const_cast<char *>(name));
+        }
+    }
+    emit chipIdFinished(r);
+}
+
+void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVerify)
+{
+    m_cancel.store(false);
+
+    WriteResult r;
+    if (!m_handle || !m_handle->device) {
+        r.errorMessage = "No chip selected.";
+        emit writeFinished(r);
+        return;
+    }
+    device_t *dev = m_handle->device;
+    const quint32 total = dev->code_memory_size;
+    if (total == 0) {
+        r.errorMessage = "Chip reports zero code memory size.";
+        emit writeFinished(r);
+        return;
+    }
+    if (static_cast<quint32>(data.size()) != total) {
+        r.errorMessage = QString(
+            "Buffer size %1 bytes does not match chip code memory %2 bytes. "
+            "Resize or reload before writing.")
+                             .arg(data.size()).arg(total);
+        emit writeFinished(r);
+        return;
+    }
+    if (!m_handle->minipro_begin_transaction
+        || !m_handle->minipro_end_transaction
+        || !m_handle->minipro_write_block
+        || !m_handle->minipro_read_block) {
+        r.errorMessage = "Programmer does not expose write protocol.";
+        emit writeFinished(r);
+        return;
+    }
+
+    const quint32 blockSize = dev->write_buffer_size
+                                  ? dev->write_buffer_size
+                                  : 64;
+
+    if (m_handle->minipro_begin_transaction(m_handle)) {
+        r.errorMessage = "begin_transaction failed";
+        emit writeFinished(r);
+        return;
+    }
+
+    // Pre-write presence check — same logic as erase. Skip if force OR if
+    // the supplied buffer is itself all 0xFF (writing 0xFF is a no-op so
+    // the empty-socket scenario doesn't lose data).
+    if (!force) {
+        bool bufferAllFF = true;
+        for (qsizetype i = 0; i < data.size(); ++i)
+            if (static_cast<quint8>(data[i]) != 0xFF) {
+                bufferAllFF = false; break;
+            }
+        if (!bufferAllFF) {
+            bool allFF = false;
+            if (probeFirstBlockAllFF(m_handle, &allFF) && allFF) {
+                m_handle->minipro_end_transaction(m_handle);
+                r.errorMessage =
+                    "Pre-write check: chip's first block reads as all "
+                    "0xFF — either it's already blank, or no chip is in "
+                    "the socket. Refusing to write.\n\n"
+                    "If the chip is seated and you intentionally want to "
+                    "write anyway, enable the Force checkbox in the "
+                    "Write dialog and try again.";
+                emit writeFinished(r);
+                return;
+            }
+        }
+    }
+
+    data_set_t ds{};
+    ds.data = const_cast<uint8_t *>(
+        reinterpret_cast<const uint8_t *>(data.constData()));
+    ds.type = MP_CODE;
+    ds.size = blockSize;
+    ds.init = 1;
+    ds.block_count = (total + blockSize - 1) / blockSize;
+
+    const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
+    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+
+    bool writeOk = true;
+    qint64 done = 0;
+    emit progress(0, total);
+
+    for (uint32_t i = 0; i < ds.block_count; ++i) {
+        if (m_cancel.load()) {
+            r.errorMessage = "Write cancelled — chip contents may be partial.";
+            writeOk = false;
+            break;
+        }
+        ds.address = i * blockSize + offset;
+        if (wordOrg)
+            ds.address >>= 1;
+
+        // Trim last block to remaining bytes.
+        if ((i + 1) * blockSize > total)
+            ds.size = total - i * blockSize;
+        else
+            ds.size = blockSize;
+
+        if (m_handle->minipro_write_block(m_handle, &ds)) {
+            r.errorMessage = QString("write_block failed at offset 0x%1")
+                                 .arg(i * blockSize, 0, 16);
+            writeOk = false;
+            break;
+        }
+        ds.data += ds.size;
+        ds.init = 0;
+        done += ds.size;
+        emit progress(qMin<qint64>(done, total), total);
+    }
+
+    if (!writeOk) {
+        m_handle->minipro_end_transaction(m_handle);
+        emit writeFinished(r);
+        return;
+    }
+    r.bytesWritten = done;
+
+    // Optional auto-verify: stay in transaction, read each block back and
+    // compare against the source buffer.
+    if (autoVerify) {
+        std::vector<uint8_t> verifyBuf(blockSize, 0xFF);
+        data_set_t vds{};
+        vds.data = verifyBuf.data();
+        vds.type = MP_CODE;
+        vds.size = blockSize;
+        vds.init = 1;
+        vds.block_count = (total + blockSize - 1) / blockSize;
+
+        const auto *expectedPtr =
+            reinterpret_cast<const uint8_t *>(data.constData());
+        qint64 vdone = 0;
+        emit progress(0, total);
+        for (uint32_t i = 0; i < vds.block_count; ++i) {
+            if (m_cancel.load()) {
+                r.errorMessage = "Verify cancelled after write.";
+                writeOk = false;
+                break;
+            }
+            const quint32 blockByteOffset = i * blockSize;
+            vds.address = blockByteOffset + offset;
+            if (wordOrg) vds.address >>= 1;
+            const quint32 thisLen = qMin<quint32>(blockSize, total - blockByteOffset);
+            vds.size = thisLen;
+            if (m_handle->minipro_read_block(m_handle, &vds)) {
+                r.errorMessage = QString("verify read_block failed at 0x%1")
+                                     .arg(blockByteOffset, 0, 16);
+                writeOk = false;
+                break;
+            }
+            for (quint32 j = 0; j < thisLen; ++j) {
+                if (verifyBuf[j] != expectedPtr[blockByteOffset + j])
+                    ++r.verifyMismatches;
+            }
+            vds.init = 0;
+            vdone += thisLen;
+            emit progress(qMin<qint64>(vdone, total), total);
+        }
+        r.verified = writeOk && r.verifyMismatches == 0;
+    }
+
+    m_handle->minipro_end_transaction(m_handle);
+    r.ok = writeOk && (!autoVerify || r.verified);
+    if (!r.ok && r.errorMessage.isEmpty() && autoVerify) {
+        r.errorMessage = QString("Verify after write: %1 byte%2 differ.")
+                             .arg(r.verifyMismatches)
+                             .arg(r.verifyMismatches == 1 ? "" : "s");
+    }
+    emit writeFinished(r);
+}

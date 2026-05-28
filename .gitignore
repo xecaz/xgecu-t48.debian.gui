@@ -1,0 +1,13 @@
+build/
+build-*/
+*.o
+*.a
+*.so
+*.pyc
+__pycache__/
+.venv/
+.cache/
+compile_commands.json
+.idea/
+.vscode/
+*.user
