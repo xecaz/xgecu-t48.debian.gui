@@ -64,6 +64,7 @@ private:
     MemArea currentArea() const;
     quint32 currentChipSize() const { return paneFor(currentArea()).chipSize; }
     void onCurrentTabChanged(int index);
+    void updateTabLabel(MemArea area);
 
     ChipDatabase *m_db;
     Programmer *m_programmer;

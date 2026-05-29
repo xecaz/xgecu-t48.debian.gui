@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- -GNinja -DCMAKE_BUILD_TYPE=Release
+
+# The minipro Makefile builds libminipro.a in third_party/minipro/src as a
+# side effect — that directory belongs to a submodule we don't own, so its
+# generated objects must not end up in the .deb. dh_auto_clean cleans the
+# CMake build dir; we additionally clean the submodule on `clean`.
+override_dh_auto_clean:
+	dh_auto_clean
+	$(MAKE) -C third_party/minipro clean || true

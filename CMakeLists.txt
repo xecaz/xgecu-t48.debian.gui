@@ -129,6 +129,35 @@ target_link_libraries(xgecu-gui PRIVATE
     minipro)
 
 # ---------------------------------------------------------------------------
+# Installation rules — consumed by debhelper for the .deb build, and usable
+# directly via `cmake --install build --prefix /usr/local`.
+# ---------------------------------------------------------------------------
+
+include(GNUInstallDirs)
+
+install(TARGETS xgecu-gui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# minipro's chip XML databases — loaded at runtime via setInfoicPath /
+# setLogicicPath, looked up under /usr/share/xgecu-gui/ at install.
+install(FILES
+        "${MINIPRO_DIR}/infoic.xml"
+        "${MINIPRO_DIR}/logicic.xml"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/xgecu-gui)
+
+install(FILES "${CMAKE_SOURCE_DIR}/packaging/xgecu-gui.desktop"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+
+install(FILES "${CMAKE_SOURCE_DIR}/packaging/xgecu-gui.svg"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+
+# udev rules ship via the OS distribution path (/lib/udev/rules.d) so
+# systemd-udevd picks them up regardless of /usr/local etc.
+install(FILES
+        "${MINIPRO_DIR}/udev/60-minipro.rules"
+        "${MINIPRO_DIR}/udev/61-minipro-uaccess.rules"
+    DESTINATION lib/udev/rules.d)
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 

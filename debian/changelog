@@ -1,0 +1,9 @@
+xgecu-gui (0.1.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+  * Bundles minipro infoic.xml / logicic.xml under /usr/share/xgecu-gui/.
+  * Installs minipro's udev rules (60-minipro.rules,
+    61-minipro-uaccess.rules) so the programmer is usable without root.
+  * Ships a .desktop launcher and SVG icon.
+
+ -- Xecaz <xecaz@xecaz.com>  Fri, 29 May 2026 12:00:00 +0200

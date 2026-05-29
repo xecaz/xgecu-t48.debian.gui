@@ -1,0 +1,19 @@
+#!/bin/sh
+# postinst — refresh udev so the minipro rules we just installed take effect
+# immediately, without requiring the user to unplug/replug the programmer.
+set -e
+
+case "$1" in
+    configure|triggered)
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=usb || true
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

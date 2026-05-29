@@ -1,0 +1,34 @@
+Source: xgecu-gui
+Section: electronics
+Priority: optional
+Maintainer: Xecaz <xecaz@xecaz.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake,
+               ninja-build,
+               pkg-config,
+               qt6-base-dev,
+               qt6-tools-dev,
+               qt6-base-dev-tools,
+               libusb-1.0-0-dev,
+               zlib1g-dev,
+               python3-venv,
+               python3-lxml
+Standards-Version: 4.6.2
+Homepage: https://github.com/xecaz/xgecu-t48.debian.gui
+Vcs-Git: https://github.com/xecaz/xgecu-t48.debian.gui.git
+Vcs-Browser: https://github.com/xecaz/xgecu-t48.debian.gui
+
+Package: xgecu-gui
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, udev
+Description: Debian GUI for XGecu T48 / T56 / TL866II+ universal programmers
+ A Qt6 desktop GUI for the XGecu T48 / T56 / TL866II+ universal device
+ programmers, built on top of the open-source minipro library.
+ .
+ Features include programmer auto-detection, a searchable database of
+ ~32 000 supported chips merged from minipro's XML and the Windows Xgpro
+ list, a ZIF socket placement preview, separate Code and Data (EEPROM)
+ tabs with an editable hex view (selection, fill, copy range, find with
+ hex/ASCII/decimal modes, undo, red dirty-byte highlighting), and the full
+ minipro programming pipeline: read, verify, blank check, detect chip ID,
+ erase, write, auto-verify-after-write.

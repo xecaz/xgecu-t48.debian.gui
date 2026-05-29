@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=XGecu Programmer
+GenericName=Device programmer
+Comment=GUI for the XGecu T48 / T56 / TL866II+ universal device programmers
+Exec=xgecu-gui
+Icon=xgecu-gui
+Terminal=false
+Categories=Development;Electronics;HardwareSettings;
+Keywords=eprom;eeprom;flash;microcontroller;programmer;minipro;t48;tl866;
+StartupNotify=true

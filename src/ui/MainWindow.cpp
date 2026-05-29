@@ -50,6 +50,8 @@ QString findMiniproFile(const QString &name)
         appDir + "/../third_party/minipro/" + name,
         QDir::currentPath() + "/third_party/minipro/" + name,
         QDir::currentPath() + "/../third_party/minipro/" + name,
+        "/usr/share/xgecu-gui/" + name,
+        "/usr/local/share/xgecu-gui/" + name,
         "/usr/local/share/minipro/" + name,
         "/usr/share/minipro/" + name,
     };
@@ -108,9 +110,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_programmer, &Programmer::eraseFinished, this, &MainWindow::onEraseFinished);
     connect(m_programmer, &Programmer::writeFinished, this, &MainWindow::onWriteFinished);
     connect(m_programmer, &Programmer::error, this, &MainWindow::onProgrammerError);
-    for (MemArea a : { MemArea::Code, MemArea::Data })
+    for (MemArea a : { MemArea::Code, MemArea::Data }) {
         connect(m_panes[a].buffer, &BufferModel::reset,
                 this, &MainWindow::updateActions);
+        connect(m_panes[a].buffer, &BufferModel::dirtyChanged,
+                this, [this, a] { updateTabLabel(a); });
+    }
 
     statusBar()->showMessage(
         QString("Loaded %1 chips (%2 supported, %3 Windows-only)%4")
@@ -637,6 +642,16 @@ MemArea MainWindow::currentArea() const
     if (!m_tabs) return MemArea::Code;
     return (m_tabs->currentIndex() == m_panes[MemArea::Data].tabIndex)
         ? MemArea::Data : MemArea::Code;
+}
+
+void MainWindow::updateTabLabel(MemArea area)
+{
+    if (!m_tabs) return;
+    const auto &pane = m_panes[area];
+    if (pane.tabIndex < 0) return;
+    const QString base = (area == MemArea::Data) ? "Data (EEPROM)" : "Code";
+    const bool dirty = pane.buffer && pane.buffer->hasDirtyBytes();
+    m_tabs->setTabText(pane.tabIndex, dirty ? ("● " + base) : base);
 }
 
 void MainWindow::onCurrentTabChanged(int)
