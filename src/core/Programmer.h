@@ -8,6 +8,11 @@
 
 class ProgrammerWorker;
 
+enum class MemArea : quint8 {
+    Code = 0,   // -> MP_CODE
+    Data = 1,   // -> MP_DATA
+};
+
 struct DeviceInfo {
     bool connected = false;
     QString model;
@@ -18,7 +23,7 @@ struct DeviceInfo {
 
 struct ReadResult {
     bool ok = false;
-    QString area;          // "code"
+    MemArea area = MemArea::Code;
     QByteArray data;
     QString errorMessage;
 };
@@ -37,6 +42,7 @@ struct ChipIdResult {
 
 struct WriteResult {
     bool ok = false;
+    MemArea area = MemArea::Code;
     qint64 bytesWritten = 0;
     QString errorMessage;
     bool verified = false;        // true if auto-verify was requested AND passed
@@ -45,7 +51,7 @@ struct WriteResult {
 
 struct VerifyResult {
     bool ok = false;            // false if any difference OR I/O error
-    QString area;
+    MemArea area = MemArea::Code;
     qint64 bytesChecked = 0;
     qint64 mismatches = 0;
     qint64 firstMismatchOffset = -1;
@@ -54,6 +60,7 @@ struct VerifyResult {
     QString errorMessage;       // non-empty only on I/O error / cancel
 };
 
+Q_DECLARE_METATYPE(MemArea)
 Q_DECLARE_METATYPE(DeviceInfo)
 Q_DECLARE_METATYPE(ReadResult)
 Q_DECLARE_METATYPE(VerifyResult)
@@ -71,11 +78,11 @@ public:
 
     void detect();
     void openChip(const QString &miniproName);
-    void readCode();
-    void verifyCode(const QByteArray &expected);
+    void readMemory(MemArea area);
+    void verifyMemory(MemArea area, const QByteArray &expected);
+    void writeMemory(MemArea area, const QByteArray &data, bool force, bool autoVerify);
     void detectChipId();
     void eraseChip(bool force);
-    void writeCode(const QByteArray &data, bool force, bool autoVerify);
     void requestCancel();
 
 signals:

@@ -26,11 +26,11 @@ public slots:
     void setLogicicPath(const QString &path) { m_logicicPath = path; }
     void detect();
     void openChip(const QString &miniproName);
-    void readCode();
-    void verifyCode(const QByteArray &expected);
+    void readMemory(MemArea area);
+    void verifyMemory(MemArea area, const QByteArray &expected);
+    void writeMemory(MemArea area, const QByteArray &data, bool force, bool autoVerify);
     void detectChipId();
     void eraseChip(bool force);
-    void writeCode(const QByteArray &data, bool force, bool autoVerify);
 
 signals:
     void detected(const DeviceInfo &info);

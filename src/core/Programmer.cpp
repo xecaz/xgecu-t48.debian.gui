@@ -6,6 +6,7 @@
 Programmer::Programmer(QObject *parent)
     : QObject(parent), m_worker(new ProgrammerWorker)
 {
+    qRegisterMetaType<MemArea>("MemArea");
     qRegisterMetaType<DeviceInfo>("DeviceInfo");
     qRegisterMetaType<ReadResult>("ReadResult");
     qRegisterMetaType<VerifyResult>("VerifyResult");
@@ -58,15 +59,27 @@ void Programmer::openChip(const QString &name)
                               Q_ARG(QString, name));
 }
 
-void Programmer::readCode()
+void Programmer::readMemory(MemArea area)
 {
-    QMetaObject::invokeMethod(m_worker, "readCode", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(m_worker, "readMemory", Qt::QueuedConnection,
+                              Q_ARG(MemArea, area));
 }
 
-void Programmer::verifyCode(const QByteArray &expected)
+void Programmer::verifyMemory(MemArea area, const QByteArray &expected)
 {
-    QMetaObject::invokeMethod(m_worker, "verifyCode", Qt::QueuedConnection,
+    QMetaObject::invokeMethod(m_worker, "verifyMemory", Qt::QueuedConnection,
+                              Q_ARG(MemArea, area),
                               Q_ARG(QByteArray, expected));
+}
+
+void Programmer::writeMemory(MemArea area, const QByteArray &data,
+                             bool force, bool autoVerify)
+{
+    QMetaObject::invokeMethod(m_worker, "writeMemory", Qt::QueuedConnection,
+                              Q_ARG(MemArea, area),
+                              Q_ARG(QByteArray, data),
+                              Q_ARG(bool, force),
+                              Q_ARG(bool, autoVerify));
 }
 
 void Programmer::detectChipId()
@@ -78,14 +91,6 @@ void Programmer::eraseChip(bool force)
 {
     QMetaObject::invokeMethod(m_worker, "eraseChip", Qt::QueuedConnection,
                               Q_ARG(bool, force));
-}
-
-void Programmer::writeCode(const QByteArray &data, bool force, bool autoVerify)
-{
-    QMetaObject::invokeMethod(m_worker, "writeCode", Qt::QueuedConnection,
-                              Q_ARG(QByteArray, data),
-                              Q_ARG(bool, force),
-                              Q_ARG(bool, autoVerify));
 }
 
 void Programmer::requestCancel()

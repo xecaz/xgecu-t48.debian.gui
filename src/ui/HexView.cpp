@@ -32,6 +32,84 @@ private:
     qsizetype m_off;
     quint8 m_old, m_new;
 };
+
+class CopyCommand : public QUndoCommand {
+public:
+    CopyCommand(BufferModel *m, qsizetype src, qsizetype length, qsizetype dst)
+        : QUndoCommand(QString("copy 0x%1..0x%2 → 0x%3")
+                           .arg(src, 0, 16)
+                           .arg(src + length - 1, 0, 16)
+                           .arg(dst, 0, 16)),
+          m_model(m), m_dst(dst)
+    {
+        if (!m) return;
+        m_payload.reserve(length);
+        m_dstOriginal.reserve(length);
+        for (qsizetype i = 0; i < length; ++i) {
+            m_payload.push_back(m->byteAt(src + i));     // what we'll write
+            m_dstOriginal.push_back(m->byteAt(dst + i)); // for undo
+        }
+    }
+    void redo() override
+    {
+        if (!m_model) return;
+        const qsizetype n = m_payload.size();
+        for (qsizetype i = 0; i < n; ++i)
+            m_model->setByteAt(m_dst + i, m_payload[i]);
+    }
+    void undo() override
+    {
+        if (!m_model) return;
+        const qsizetype n = m_dstOriginal.size();
+        for (qsizetype i = 0; i < n; ++i)
+            m_model->setByteAt(m_dst + i, m_dstOriginal[i]);
+    }
+
+private:
+    QPointer<BufferModel> m_model;
+    qsizetype m_dst;
+    QList<quint8> m_payload;
+    QList<quint8> m_dstOriginal;
+};
+
+class FillCommand : public QUndoCommand {
+public:
+    FillCommand(BufferModel *m, qsizetype start, qsizetype length,
+                const QByteArray &pattern)
+        : QUndoCommand(QString("fill 0x%1..0x%2 with %3-byte pattern")
+                           .arg(start, 0, 16)
+                           .arg(start + length - 1, 0, 16)
+                           .arg(pattern.size())),
+          m_model(m), m_start(start), m_pattern(pattern)
+    {
+        if (!m) return;
+        m_old.reserve(length);
+        for (qsizetype i = 0; i < length; ++i)
+            m_old.push_back(m->byteAt(start + i));
+    }
+    void redo() override
+    {
+        if (!m_model || m_pattern.isEmpty()) return;
+        const qsizetype n = m_old.size();
+        const qsizetype p = m_pattern.size();
+        for (qsizetype i = 0; i < n; ++i)
+            m_model->setByteAt(m_start + i,
+                               static_cast<quint8>(m_pattern[i % p]));
+    }
+    void undo() override
+    {
+        if (!m_model) return;
+        const qsizetype n = m_old.size();
+        for (qsizetype i = 0; i < n; ++i)
+            m_model->setByteAt(m_start + i, m_old[i]);
+    }
+
+private:
+    QPointer<BufferModel> m_model;
+    qsizetype m_start;
+    QByteArray m_pattern;
+    QList<quint8> m_old;
+};
 }  // namespace
 
 HexView::HexView(QWidget *parent) : QAbstractScrollArea(parent)
@@ -74,6 +152,89 @@ void HexView::gotoOffset(qsizetype offset)
     moveCursor(qBound<qsizetype>(0, offset, m_model->size() - 1), false);
 }
 
+qsizetype HexView::selectionStart() const
+{
+    if (!hasSelection()) return m_cursorOffset;
+    return qMin(m_anchor, m_cursorOffset);
+}
+
+qsizetype HexView::selectionLength() const
+{
+    if (!hasSelection()) return 0;
+    // Selection is half-open: [start, end); end = max + 1.
+    return qAbs(m_cursorOffset - m_anchor) + 1;
+}
+
+void HexView::clearSelection()
+{
+    if (m_anchor < 0) return;
+    m_anchor = -1;
+    viewport()->update();
+}
+
+void HexView::selectRange(qsizetype start, qsizetype length)
+{
+    if (!m_model || length <= 0) { clearSelection(); return; }
+    const qsizetype bytes = m_model->size();
+    start = qBound<qsizetype>(0, start, bytes - 1);
+    qsizetype end = qBound<qsizetype>(0, start + length - 1, bytes - 1);
+    m_anchor = start;
+    m_cursorOffset = end;
+    ensureCursorVisible();
+    viewport()->update();
+}
+
+qsizetype HexView::fillRange(qsizetype start, qsizetype length,
+                              const QByteArray &pattern)
+{
+    if (!m_model || length <= 0 || pattern.isEmpty()) return 0;
+    const qsizetype bytes = m_model->size();
+    start = qMax<qsizetype>(0, start);
+    if (start >= bytes) return 0;
+    if (start + length > bytes) length = bytes - start;
+    m_undo.push(new FillCommand(m_model, start, length, pattern));
+    return length;
+}
+
+qsizetype HexView::copyRange(qsizetype src, qsizetype length, qsizetype dst)
+{
+    if (!m_model || length <= 0 || src < 0 || dst < 0) return 0;
+    const qsizetype bytes = m_model->size();
+    if (src >= bytes || dst >= bytes) return 0;
+    // Clamp by both source and destination ends.
+    length = qMin(length, bytes - src);
+    length = qMin(length, bytes - dst);
+    if (length <= 0) return 0;
+    m_undo.push(new CopyCommand(m_model, src, length, dst));
+    return length;
+}
+
+qsizetype HexView::findBytes(const QByteArray &needle, qsizetype from) const
+{
+    if (!m_model || needle.isEmpty()) return -1;
+    const qsizetype n = m_model->size();
+    if (n == 0 || needle.size() > n) return -1;
+    auto search = [&](qsizetype begin, qsizetype end) -> qsizetype {
+        const qsizetype last = end - needle.size();
+        for (qsizetype i = begin; i <= last; ++i) {
+            bool match = true;
+            for (qsizetype j = 0; j < needle.size(); ++j) {
+                if (m_model->byteAt(i + j)
+                    != static_cast<quint8>(needle[j])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return i;
+        }
+        return -1;
+    };
+    qsizetype hit = search(qMax<qsizetype>(0, from), n);
+    if (hit >= 0) return hit;
+    // Wrap-around: search [0, from + needle.size()).
+    return search(0, qMin(n, from + needle.size() - 1));
+}
+
 int HexView::rowHeight() const { return fontMetrics().height() + kVPad; }
 int HexView::addrColumnPx() const { return fontMetrics().horizontalAdvance("00000000") + kHGap; }
 int HexView::hexByteWidth() const { return fontMetrics().horizontalAdvance("FF "); }
@@ -106,14 +267,46 @@ void HexView::ensureCursorVisible()
         verticalScrollBar()->setValue(row - visibleRows + 1);
 }
 
-void HexView::moveCursor(qsizetype newOffset, bool keepNibble)
+void HexView::moveCursor(qsizetype newOffset, bool keepNibble, bool extendSelection)
 {
     if (!m_model || m_model->size() == 0) return;
     const qsizetype bytes = m_model->size();
+    const qsizetype prev = m_cursorOffset;
     m_cursorOffset = qBound<qsizetype>(0, newOffset, bytes - 1);
     if (!keepNibble) m_nibbleHi = true;
+    if (extendSelection) {
+        if (m_anchor < 0) m_anchor = prev;
+    } else {
+        m_anchor = -1;
+    }
     ensureCursorVisible();
     viewport()->update();
+}
+
+qsizetype HexView::offsetAtPos(const QPoint &p, Column *col) const
+{
+    if (!m_model || m_model->size() == 0) return -1;
+    const int rh = rowHeight();
+    if (rh <= 0) return -1;
+    const int row = firstVisibleRow() + p.y() / rh;
+    const int hexL = hexColumnLeft();
+    const int asciiL = asciiColumnLeft();
+    const int byteW = hexByteWidth();
+    if (p.x() >= hexL && p.x() < asciiL - kHGap) {
+        const int c = (p.x() - hexL) / byteW;
+        if (c >= 0 && c < m_bytesPerRow) {
+            if (col) *col = Column::Hex;
+            return qsizetype(row) * m_bytesPerRow + c;
+        }
+    } else if (p.x() >= asciiL) {
+        const int asciiCharW = fontMetrics().horizontalAdvance("M");
+        const int c = (p.x() - asciiL) / asciiCharW;
+        if (c >= 0 && c < m_bytesPerRow) {
+            if (col) *col = Column::Ascii;
+            return qsizetype(row) * m_bytesPerRow + c;
+        }
+    }
+    return -1;
 }
 
 void HexView::applyByteEdit(qsizetype offset, quint8 newValue)
@@ -180,36 +373,47 @@ void HexView::focusOutEvent(QFocusEvent *e)
 
 void HexView::mousePressEvent(QMouseEvent *e)
 {
-    if (!m_model || m_model->size() == 0) {
+    if (!m_model || m_model->size() == 0 || e->button() != Qt::LeftButton) {
         QAbstractScrollArea::mousePressEvent(e);
         return;
     }
     setFocus();
-    const QPoint p = e->position().toPoint();
-    const int rh = rowHeight();
-    if (rh <= 0) return;
-    const int row = firstVisibleRow() + p.y() / rh;
+    Column col = m_cursorColumn;
+    const qsizetype off = offsetAtPos(e->position().toPoint(), &col);
+    if (off < 0) return;
+    m_cursorColumn = col;
+    const bool shift = (e->modifiers() & Qt::ShiftModifier);
+    moveCursor(off, false, shift);
+    m_mouseDown = !shift;  // shift-click sets selection end; further drag extends
+    if (!shift) m_anchor = -1;  // plain click clears any selection
+    // For a drag operation, treat first press as anchor.
+    if (e->button() == Qt::LeftButton && !shift)
+        m_anchor = off;
+    viewport()->update();
+}
 
-    const int hexL = hexColumnLeft();
-    const int asciiL = asciiColumnLeft();
-    const int byteW = hexByteWidth();
-
-    qsizetype off = -1;
-    if (p.x() >= hexL && p.x() < asciiL - kHGap) {
-        const int col = (p.x() - hexL) / byteW;
-        if (col >= 0 && col < m_bytesPerRow) {
-            off = qsizetype(row) * m_bytesPerRow + col;
-            m_cursorColumn = Column::Hex;
-        }
-    } else if (p.x() >= asciiL) {
-        const int asciiCharW = fontMetrics().horizontalAdvance("M");
-        const int col = (p.x() - asciiL) / asciiCharW;
-        if (col >= 0 && col < m_bytesPerRow) {
-            off = qsizetype(row) * m_bytesPerRow + col;
-            m_cursorColumn = Column::Ascii;
+void HexView::mouseMoveEvent(QMouseEvent *e)
+{
+    if (!m_model || m_model->size() == 0 || !(e->buttons() & Qt::LeftButton)) {
+        QAbstractScrollArea::mouseMoveEvent(e);
+        return;
+    }
+    Column col = m_cursorColumn;
+    qsizetype off = offsetAtPos(e->position().toPoint(), &col);
+    if (off < 0) {
+        // Clamp to nearest valid offset based on Y position.
+        const int rh = rowHeight();
+        if (rh > 0) {
+            const int y = static_cast<int>(e->position().y());
+            int row = firstVisibleRow() + qMax(0, y / rh);
+            off = qBound<qsizetype>(0, qsizetype(row) * m_bytesPerRow,
+                                    m_model->size() - 1);
         }
     }
-    if (off >= 0) moveCursor(off, false);
+    if (off < 0) return;
+    if (m_anchor < 0) m_anchor = m_cursorOffset;
+    m_cursorColumn = col;
+    moveCursor(off, false, /*extendSelection=*/true);
 }
 
 void HexView::keyPressEvent(QKeyEvent *e)
@@ -224,26 +428,36 @@ void HexView::keyPressEvent(QKeyEvent *e)
     if (e->matches(QKeySequence::Undo)) { m_undo.undo(); viewport()->update(); return; }
     if (e->matches(QKeySequence::Redo)) { m_undo.redo(); viewport()->update(); return; }
 
+    const bool shift = (e->modifiers() & Qt::ShiftModifier);
     switch (e->key()) {
-    case Qt::Key_Left:  moveCursor(m_cursorOffset - 1, false); return;
-    case Qt::Key_Right: moveCursor(m_cursorOffset + 1, false); return;
-    case Qt::Key_Up:    moveCursor(m_cursorOffset - m_bytesPerRow, false); return;
-    case Qt::Key_Down:  moveCursor(m_cursorOffset + m_bytesPerRow, false); return;
+    case Qt::Key_Left:  moveCursor(m_cursorOffset - 1, false, shift); return;
+    case Qt::Key_Right: moveCursor(m_cursorOffset + 1, false, shift); return;
+    case Qt::Key_Up:    moveCursor(m_cursorOffset - m_bytesPerRow, false, shift); return;
+    case Qt::Key_Down:  moveCursor(m_cursorOffset + m_bytesPerRow, false, shift); return;
     case Qt::Key_PageUp:
-        moveCursor(m_cursorOffset - qsizetype(visibleRows) * m_bytesPerRow, false);
+        moveCursor(m_cursorOffset - qsizetype(visibleRows) * m_bytesPerRow,
+                   false, shift);
         return;
     case Qt::Key_PageDown:
-        moveCursor(m_cursorOffset + qsizetype(visibleRows) * m_bytesPerRow, false);
+        moveCursor(m_cursorOffset + qsizetype(visibleRows) * m_bytesPerRow,
+                   false, shift);
         return;
     case Qt::Key_Home:
-        moveCursor((m_cursorOffset / m_bytesPerRow) * m_bytesPerRow, false);
+        moveCursor((m_cursorOffset / m_bytesPerRow) * m_bytesPerRow,
+                   false, shift);
         return;
     case Qt::Key_End: {
         qsizetype eol = (m_cursorOffset / m_bytesPerRow) * m_bytesPerRow
                         + m_bytesPerRow - 1;
-        moveCursor(qMin(eol, bytes - 1), false);
+        moveCursor(qMin(eol, bytes - 1), false, shift);
         return;
     }
+    case Qt::Key_A:
+        if (e->modifiers() & Qt::ControlModifier) {
+            selectRange(0, m_model->size());
+            return;
+        }
+        break;
     case Qt::Key_Tab:
         m_cursorColumn = (m_cursorColumn == Column::Hex)
                              ? Column::Ascii : Column::Hex;
@@ -309,7 +523,12 @@ void HexView::paintEvent(QPaintEvent *e)
     const QColor cursorBg = palette().highlight().color();
     const QColor cursorFg = palette().highlightedText().color();
     const QColor nibbleBg = cursorBg.darker(140);
+    QColor selBg = cursorBg; selBg.setAlpha(100);
     const QColor dirtyFg(220, 50, 47);   // red for unsaved edits
+
+    const bool sel = hasSelection();
+    const qsizetype selA = sel ? qMin(m_anchor, m_cursorOffset) : -1;
+    const qsizetype selB = sel ? qMax(m_anchor, m_cursorOffset) : -1;
 
     for (int row = firstRow; row < std::min(totalRows, firstRow + visibleRows); ++row) {
         const int y = (row - firstRow) * rh + kVPad;
@@ -328,6 +547,9 @@ void HexView::paintEvent(QPaintEvent *e)
             const QRect cellRect(addrW + i * byteW, y, byteW, rh - 2);
             const bool isCursor = (off == m_cursorOffset);
             const bool isDirty = m_model->isDirty(off);
+            const bool isSel = sel && off >= selA && off <= selB;
+            if (isSel && !isCursor)
+                p.fillRect(cellRect.adjusted(0, 1, -2, -1), selBg);
             if (isCursor && m_cursorColumn == Column::Hex && hasFocus()) {
                 // Highlight the cursor cell and the active nibble within it.
                 p.fillRect(cellRect.adjusted(0, 1, -2, -1), cursorBg);
@@ -354,6 +576,9 @@ void HexView::paintEvent(QPaintEvent *e)
             const QRect cellRect(asciiX + i * asciiCharW, y, asciiCharW, rh - 2);
             const bool isCursor = (off == m_cursorOffset);
             const bool isDirty = m_model->isDirty(off);
+            const bool isSel = sel && off >= selA && off <= selB;
+            if (isSel && !isCursor)
+                p.fillRect(cellRect.adjusted(0, 1, 0, -1), selBg);
             if (isCursor && m_cursorColumn == Column::Ascii && hasFocus()) {
                 p.fillRect(cellRect.adjusted(0, 1, 0, -1), cursorBg);
                 p.setPen(cursorFg);

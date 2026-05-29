@@ -108,50 +108,66 @@ void ProgrammerWorker::openChip(const QString &miniproName)
                     static_cast<bool>(dev->flags.can_erase));
 }
 
-void ProgrammerWorker::readCode()
+namespace {
+quint8 areaToMp(MemArea a) { return (a == MemArea::Data) ? MP_DATA : MP_CODE; }
+quint32 areaTotalSize(const device_t *dev, MemArea a)
+{
+    return (a == MemArea::Data) ? dev->data_memory_size : dev->code_memory_size;
+}
+const char *areaName(MemArea a) { return (a == MemArea::Data) ? "data" : "code"; }
+}  // namespace
+
+void ProgrammerWorker::readMemory(MemArea area)
 {
     m_cancel.store(false);
 
+    ReadResult r;
+    r.area = area;
     if (!m_handle || !m_handle->device) {
-        emit error("No chip selected. Pick a chip first.");
+        r.errorMessage = "No chip selected. Pick a chip first.";
+        emit readFinished(r);
         return;
     }
     device_t *dev = m_handle->device;
-    const quint32 total = dev->code_memory_size;
+    const quint32 total = areaTotalSize(dev, area);
     if (total == 0) {
-        emit error("Chip reports zero code memory size.");
+        r.errorMessage = QString("Chip has no %1 memory.").arg(areaName(area));
+        emit readFinished(r);
         return;
     }
     const quint32 blockSize = dev->read_buffer_size
                                   ? dev->read_buffer_size
                                   : 64;
+    const quint8 mpType = areaToMp(area);
 
     std::vector<uint8_t> buf(total, 0xFF);
 
     if (m_handle->minipro_begin_transaction
         && m_handle->minipro_begin_transaction(m_handle)) {
-        emit error("begin_transaction failed");
+        r.errorMessage = "begin_transaction failed";
+        emit readFinished(r);
         return;
     }
 
     data_set_t ds{};
     ds.data = buf.data();
-    ds.type = MP_CODE;
+    ds.type = mpType;
     ds.size = blockSize;
     ds.init = 1;
     ds.block_count = (total + blockSize - 1) / blockSize;
 
     const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
-    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+    // The word-organised address shift only applies to code memory.
+    const bool wordOrg = (area == MemArea::Code)
+        && (dev->flags.data_org == MP_ORG_WORDS);
 
     bool ok = true;
-    QString errMsg;
     qint64 done = 0;
     emit progress(0, total);
 
     for (uint32_t i = 0; i < ds.block_count; ++i) {
         if (m_cancel.load()) {
-            errMsg = "Read cancelled";
+            r.errorMessage = "Read cancelled";
             ok = false;
             break;
         }
@@ -163,8 +179,8 @@ void ProgrammerWorker::readCode()
                            : -1;
         if (rc) {
             ok = false;
-            errMsg = QString("read_block failed at offset 0x%1")
-                         .arg(i * blockSize, 0, 16);
+            r.errorMessage = QString("read_block failed at offset 0x%1")
+                                 .arg(i * blockSize, 0, 16);
             break;
         }
         ds.data += ds.size;
@@ -176,23 +192,19 @@ void ProgrammerWorker::readCode()
     if (m_handle->minipro_end_transaction)
         m_handle->minipro_end_transaction(m_handle);
 
-    ReadResult r;
     r.ok = ok;
-    r.area = "code";
     if (ok)
         r.data = QByteArray(reinterpret_cast<const char *>(buf.data()),
                             static_cast<qsizetype>(total));
-    else
-        r.errorMessage = errMsg;
     emit readFinished(r);
 }
 
-void ProgrammerWorker::verifyCode(const QByteArray &expected)
+void ProgrammerWorker::verifyMemory(MemArea area, const QByteArray &expected)
 {
     m_cancel.store(false);
 
     VerifyResult v;
-    v.area = "code";
+    v.area = area;
 
     if (!m_handle || !m_handle->device) {
         v.errorMessage = "No chip selected. Pick a chip first.";
@@ -200,21 +212,22 @@ void ProgrammerWorker::verifyCode(const QByteArray &expected)
         return;
     }
     device_t *dev = m_handle->device;
-    const quint32 total = dev->code_memory_size;
+    const quint32 total = areaTotalSize(dev, area);
     if (total == 0) {
-        v.errorMessage = "Chip reports zero code memory size.";
+        v.errorMessage = QString("Chip has no %1 memory.").arg(areaName(area));
         emit verifyFinished(v);
         return;
     }
     if (static_cast<quint32>(expected.size()) != total) {
         v.errorMessage = QString(
-            "Buffer size %1 bytes does not match chip code memory %2 bytes. "
+            "Buffer size %1 bytes does not match chip %2 memory %3 bytes. "
             "Resize the buffer or reload a matching file before verifying.")
-                             .arg(expected.size()).arg(total);
+                             .arg(expected.size()).arg(areaName(area)).arg(total);
         emit verifyFinished(v);
         return;
     }
     const quint32 blockSize = dev->read_buffer_size ? dev->read_buffer_size : 64;
+    const quint8 mpType = areaToMp(area);
     std::vector<uint8_t> buf(blockSize, 0xFF);
 
     if (m_handle->minipro_begin_transaction
@@ -226,13 +239,14 @@ void ProgrammerWorker::verifyCode(const QByteArray &expected)
 
     data_set_t ds{};
     ds.data = buf.data();
-    ds.type = MP_CODE;
+    ds.type = mpType;
     ds.size = blockSize;
     ds.init = 1;
     ds.block_count = (total + blockSize - 1) / blockSize;
 
     const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
-    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+    const bool wordOrg = (area == MemArea::Code)
+        && (dev->flags.data_org == MP_ORG_WORDS);
 
     bool ioOk = true;
     qint64 done = 0;
@@ -302,7 +316,7 @@ bool probeFirstBlockAllFF(minipro_handle_t *h, bool *allFF)
     std::vector<uint8_t> probe(probeSize, 0);
     data_set_t ds{};
     ds.data = probe.data();
-    ds.type = MP_CODE;
+    ds.type = MP_CODE;  // presence probe always reads code memory
     ds.size = probeSize;
     ds.init = 1;
     ds.block_count = 1;
@@ -484,28 +498,30 @@ void ProgrammerWorker::detectChipId()
     emit chipIdFinished(r);
 }
 
-void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVerify)
+void ProgrammerWorker::writeMemory(MemArea area, const QByteArray &data,
+                                   bool force, bool autoVerify)
 {
     m_cancel.store(false);
 
     WriteResult r;
+    r.area = area;
     if (!m_handle || !m_handle->device) {
         r.errorMessage = "No chip selected.";
         emit writeFinished(r);
         return;
     }
     device_t *dev = m_handle->device;
-    const quint32 total = dev->code_memory_size;
+    const quint32 total = areaTotalSize(dev, area);
     if (total == 0) {
-        r.errorMessage = "Chip reports zero code memory size.";
+        r.errorMessage = QString("Chip has no %1 memory.").arg(areaName(area));
         emit writeFinished(r);
         return;
     }
     if (static_cast<quint32>(data.size()) != total) {
         r.errorMessage = QString(
-            "Buffer size %1 bytes does not match chip code memory %2 bytes. "
+            "Buffer size %1 bytes does not match chip %2 memory %3 bytes. "
             "Resize or reload before writing.")
-                             .arg(data.size()).arg(total);
+                             .arg(data.size()).arg(areaName(area)).arg(total);
         emit writeFinished(r);
         return;
     }
@@ -521,6 +537,7 @@ void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVe
     const quint32 blockSize = dev->write_buffer_size
                                   ? dev->write_buffer_size
                                   : 64;
+    const quint8 mpType = areaToMp(area);
 
     if (m_handle->minipro_begin_transaction(m_handle)) {
         r.errorMessage = "begin_transaction failed";
@@ -530,7 +547,9 @@ void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVe
 
     // Pre-write presence check — same logic as erase. Skip if force OR if
     // the supplied buffer is itself all 0xFF (writing 0xFF is a no-op so
-    // the empty-socket scenario doesn't lose data).
+    // the empty-socket scenario doesn't lose data). The presence probe
+    // always reads from code memory because data memory is sometimes
+    // populated by external initialisation rather than visible at startup.
     if (!force) {
         bool bufferAllFF = true;
         for (qsizetype i = 0; i < data.size(); ++i)
@@ -557,13 +576,14 @@ void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVe
     data_set_t ds{};
     ds.data = const_cast<uint8_t *>(
         reinterpret_cast<const uint8_t *>(data.constData()));
-    ds.type = MP_CODE;
+    ds.type = mpType;
     ds.size = blockSize;
     ds.init = 1;
     ds.block_count = (total + blockSize - 1) / blockSize;
 
     const quint32 offset = dev->flags.has_data_offset ? dev->page_size : 0;
-    const bool wordOrg = dev->flags.data_org == MP_ORG_WORDS;
+    const bool wordOrg = (area == MemArea::Code)
+        && (dev->flags.data_org == MP_ORG_WORDS);
 
     bool writeOk = true;
     qint64 done = 0;
@@ -610,7 +630,7 @@ void ProgrammerWorker::writeCode(const QByteArray &data, bool force, bool autoVe
         std::vector<uint8_t> verifyBuf(blockSize, 0xFF);
         data_set_t vds{};
         vds.data = verifyBuf.data();
-        vds.type = MP_CODE;
+        vds.type = mpType;
         vds.size = blockSize;
         vds.init = 1;
         vds.block_count = (total + blockSize - 1) / blockSize;
