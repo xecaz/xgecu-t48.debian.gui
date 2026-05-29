@@ -6,6 +6,8 @@ License: **GPL-3.0-or-later** (inherited from linking minipro).
 
 ![Screenshot — writing an AT27C256 EPROM](screenshot.jpg)
 
+**User guide:** [`docs/USAGE.md`](docs/USAGE.md) — step-by-step walkthrough of the GUI, including udev setup, ZIF placement, every device action, hex-editor power tools, and a troubleshooting section.
+
 ## Status
 
 Verified end-to-end on a real T48 against a Microchip-fab AT27C256:
