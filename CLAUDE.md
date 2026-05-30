@@ -2,7 +2,7 @@
 
 A Qt6 / C++ Debian GUI for the XGecu **T48 / T56 / TL866II+** universal device programmers, built on top of the open-source [minipro](https://gitlab.com/DavidGriffith/minipro) library.
 
-Released tag: **`v0.1.0`** (commit `282814d`). Verified end-to-end against a real T48 + Microchip-fab AT27C256 (UV-EPROM): read → save → load → verify → write → auto-verify round-trip works.
+Released tag: **`v0.3.0`**. Verified end-to-end against a real T48 + Microchip-fab AT27C256 (UV-EPROM): read → save → load → verify → write → auto-verify round-trip works, and against an ATmega328P (fuse read + a live CKDIV8 write round-trip). v0.2.0 added the fuse/config editor + HexView copy-address; v0.3.0 added the Preferences dialog (themes + font sizes).
 
 License: **GPL-3.0-or-later** (forced by static linkage against minipro). Add `// SPDX-License-Identifier: GPL-3.0-or-later` to every new source file.
 
@@ -11,13 +11,13 @@ Window title: `XGecu T-48/T-56/TL866II+ by Xecaz`. About box credits Xecaz + Cla
 ## Layout
 
 - `src/core/` — non-Qt-Widgets logic: `Programmer` + `ProgrammerWorker` (on a dedicated `QThread`), `ChipDatabase`, `BufferModel` (with dirty tracking + `dirtyChanged` signal).
-- `src/ui/` — Qt widgets: `MainWindow`, `ChipSelectDialog`, `ZifSocketView`, `HexView`.
+- `src/ui/` — Qt widgets: `MainWindow`, `ChipSelectDialog`, `ZifSocketView`, `HexView`, `FuseEditorWidget`, `PreferencesDialog`, plus `Theme`/`ThemeManager` (appearance).
 - `third_party/minipro/` — **git submodule** of `https://gitlab.com/DavidGriffith/minipro.git`, pinned. Clone with `--recurse-submodules`.
 - `scripts/merge_chip_lists.py` — combines `third_party/minipro/infoic.xml` + `../T48_List.txt` into `data/chips_merged.json`.
 - `data/chips_merged.json` — generated chip catalog (~9 MB raw; gets Qt-resource-compressed in the binary). Committed for now so building doesn't require running the merge first.
 - `tests/` — Qt Test unit tests (`test_chip_database`, `test_buffer_model`).
 - `tests/live/test_live_programmer.cpp` — live-hardware smoke tests, each method `QSKIP`s unless `XGECU_LIVE_TESTS=1`. The default `ctest` run stays green without hardware.
-- `debian/` — packaging (`control`, `rules`, `changelog`, `copyright`, `source/format`, `postinst`, `postrm`). `dpkg-buildpackage -b -us -uc` builds the `.deb`.
+- `debian/` — packaging (`control`, `rules`, `changelog`, `copyright`, `source/format`, `postinst`, `postrm`). `dpkg-buildpackage -b -us -uc` builds the `.deb` into the parent dir. `debian/rules` uses `--buildsystem=cmake+ninja` (configure AND build via Ninja — don't reintroduce a bare `-GNinja` under the plain `cmake` buildsystem, which makes debhelper run `make` against a Ninja build dir and fail). Runtime deps are auto-filled by `dh_shlibdeps`; the dbgsym package is a normal side-product.
 - `packaging/xgecu-gui.desktop` — application launcher.
 - `packaging/xgecu-gui.svg` — stylised DIP-package icon.
 
@@ -118,6 +118,14 @@ Value representation — the subtle part, mirroring the minipro CLI:
 
 The whole path is exercised read-only against live silicon by `readFusesFromAtmega328p` in the gated live harness.
 
+## Theming / Preferences (`ThemeManager`, `PreferencesDialog`)
+
+**File → Preferences…** (Ctrl+,) picks a theme — **Light / Dark / Hacker (green-on-black) / Amber (amber-on-black)** — and sets the **UI** and **hex-editor** font sizes independently (8–16 / 8–20 pt). Changes preview live and persist via `QSettings` (`appearance/theme` stored as the enum *name*, `appearance/uiFontSize`, `appearance/hexFontSize`); Cancel reverts to the values active when the dialog opened, Restore Defaults → Light/10/10.
+
+`ThemeManager` is a Meyers singleton (`ThemeManager::instance()`). `loadFromSettings()` is called in `main.cpp` **before** `MainWindow` is constructed so the first paint is already themed (no flash). `apply()` forces **`QApplication::setStyle("Fusion")`** — native styles ignore large parts of a custom `QPalette`, Fusion honors every role — then sets the palette + UI font. Setters persist their key and `emit changed()`.
+
+The `Theme` struct (`Theme.h`) holds the `QPalette` **plus accent colors** for the custom painters, because those widgets don't get their colors from the palette. Every value that used to be a hardcoded literal is now a `Theme` field: HexView dirty-byte red; all of ZifSocketView (socket body, IC↑ text, lever stem + ball gradient/outline, idle/active pins, pin text, chip body, pin-1 marker); ChipSelectDialog's Windows-only row color. Custom widgets read `ThemeManager::instance().theme().<field>` in `paintEvent` and repaint on the `changed()` signal (HexView also rebuilds its monospace font from `hexFontSize()`). Standard widgets repaint automatically from the app-palette change. To add/retune a theme, edit the one table in `ThemeManager::makeTheme()` — keep `pinActive` vs `pinIdle` and `pin1Marker` legible per theme (Hacker/Amber use lime / pale-amber pin-1 dots so they don't blend into the active-pin color).
+
 ## Safety / "live" testing
 
 The connected programmer has a real T48 plugged in. **Never run destructive operations without explicit user confirmation in this conversation.** Read-only operations safe in any phase: device-info, chip-ID read, code/data-memory read, verify, blank check. Erase / Write require interactive `QMessageBox` confirmation in the UI.
@@ -133,7 +141,7 @@ If the user has an original EEPROM in the socket without a backup, the rule is: 
 - `extern "C" { #include "minipro.h" }` only inside `.cpp` files; keep minipro out of headers (use opaque forward decl `struct minipro_handle;` etc.).
 - One short comment only for non-obvious WHY (e.g. "TL866 convention: chip top-justified"). No file-banner comments beyond the SPDX line.
 - New chips/protocols are minipro's domain — do NOT add custom chip definitions here; upstream them to minipro instead.
-- Toolbar/menu wording trends short ("Read chip…", "Verify chip…") rather than verbose. File menu has only Open/Save/Exit; toolbar has device actions only. The Maximize/Fullscreen button was removed from the toolbar; Ctrl+M toggles maximize via `setWindowState(... ^ Qt::WindowMaximized)`. On GNOME the title-bar buttons obey `org.gnome.desktop.wm.preferences.button-layout` and the WM ignores our `WindowMaximizeButtonHint` — that's a user-side gsettings call (`gsettings set … button-layout 'appmenu:minimize,maximize,close'`), not something we can override.
+- Toolbar/menu wording trends short ("Read chip…", "Verify chip…", "Write chip…") rather than verbose. File menu has Open/Save, Preferences…, Exit; toolbar has device actions only. The Maximize/Fullscreen button was removed from the toolbar; Ctrl+M toggles maximize via `setWindowState(... ^ Qt::WindowMaximized)`. On GNOME the title-bar buttons obey `org.gnome.desktop.wm.preferences.button-layout` and the WM ignores our `WindowMaximizeButtonHint` — that's a user-side gsettings call (`gsettings set … button-layout 'appmenu:minimize,maximize,close'`), not something we can override.
 
 ## Status (Phases 0–2 complete; Data tab UI ready)
 
@@ -149,7 +157,9 @@ If the user has an original EEPROM in the socket without a backup, the rule is: 
 - ✅ Editable `HexView` (cursor, selection, edit, undo, dirty highlight, Fill, Copy, Find, Goto).
 - ✅ Code / Data tabs with per-tab dirty marker.
 - ✅ Generic fuse / config + lock-bit editor (`FuseEditorWidget`), mask-aware, read/write/verify, separate lock write with warnings.
-- ✅ `.deb` packaging (debian/ tree + .desktop + SVG icon + udev rules).
+- ✅ HexView copy-address (right-click / Ctrl+Shift+C) in the `0x…` form the Go-to / Fill / Copy dialogs accept.
+- ✅ Preferences dialog: Light/Dark/Hacker/Amber themes + independent UI & hex font sizes, live-applied and persisted (`ThemeManager`).
+- ✅ `.deb` packaging (debian/ tree + .desktop + SVG icon + udev rules); `dpkg-buildpackage` fixed to `cmake+ninja`.
 - ✅ Live-hardware test harness gated by `XGECU_LIVE_TESTS=1`.
 - ✅ ATmega328P verified on real silicon: detect, code/data round-trip, **and fuse read** all green in the live harness.
 
