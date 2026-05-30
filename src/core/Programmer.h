@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QThread>
@@ -60,12 +61,32 @@ struct VerifyResult {
     QString errorMessage;       // non-empty only on I/O error / cancel
 };
 
+// One config-fuse or lock item, as declared by minipro's fuse_decl_t.
+// minipro carries only {name, mask, default} per item — no per-bit names.
+struct FuseItem {
+    QString name;          // "lfuse", "hfuse", "efuse", "lock", ...
+    quint16 mask = 0xFF;   // valid bits; bits outside the mask always read 1
+    quint16 def = 0;       // manufacturer default / recommended value
+    quint16 value = 0;     // current value (read from chip, or edited in UI)
+    bool isLock = false;   // false = config fuse (MP_FUSE_CFG), true = MP_FUSE_LOCK
+};
+
+struct FuseSet {
+    bool valid = false;     // true if the chip exposes a config/fuse section
+    int wordSize = 1;       // bytes per item (1 for AVR, 2 for some PIC)
+    bool lockReadable = true;  // false when flags.lock_bit_write_only is set
+    QList<FuseItem> items;  // config fuses first, then locks
+    QString errorMessage;   // non-empty only on read/write I/O error
+};
+
 Q_DECLARE_METATYPE(MemArea)
 Q_DECLARE_METATYPE(DeviceInfo)
 Q_DECLARE_METATYPE(ReadResult)
 Q_DECLARE_METATYPE(VerifyResult)
 Q_DECLARE_METATYPE(ChipIdResult)
 Q_DECLARE_METATYPE(WriteResult)
+Q_DECLARE_METATYPE(FuseItem)
+Q_DECLARE_METATYPE(FuseSet)
 
 class Programmer : public QObject {
     Q_OBJECT
@@ -83,6 +104,8 @@ public:
     void writeMemory(MemArea area, const QByteArray &data, bool force, bool autoVerify);
     void detectChipId();
     void eraseChip(bool force);
+    void readFuses();
+    void writeFuses(const FuseSet &fuses);
     void requestCancel();
 
 signals:
@@ -97,6 +120,11 @@ signals:
     void chipIdFinished(const ChipIdResult &result);
     void eraseFinished(bool ok, const QString &message);
     void writeFinished(const WriteResult &result);
+    // Emitted on openChip: the chip's declared fuse layout (values not yet read).
+    // An invalid/empty FuseSet means the chip has no fuses — hide the editor.
+    void fusesAvailable(const FuseSet &fuses);
+    void fusesRead(const FuseSet &fuses);
+    void fuseWriteFinished(bool ok, bool verified, const QString &message);
     void error(const QString &message);
 
 private:

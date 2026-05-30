@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(xgecu-gui
-    VERSION 0.0.1
+    VERSION 0.2.0
     DESCRIPTION "Debian GUI for XGecu T48/T56/TL866II+ universal programmers"
     LANGUAGES C CXX)
 
@@ -108,6 +108,8 @@ qt_add_executable(xgecu-gui
     src/ui/ChipSelectDialog.h
     src/ui/HexView.cpp
     src/ui/HexView.h
+    src/ui/FuseEditorWidget.cpp
+    src/ui/FuseEditorWidget.h
     src/core/ChipDatabase.cpp
     src/core/ChipDatabase.h
     src/core/Programmer.cpp

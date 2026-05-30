@@ -35,6 +35,7 @@
 #include <QVBoxLayout>
 
 #include "ChipSelectDialog.h"
+#include "FuseEditorWidget.h"
 #include "HexView.h"
 #include "ZifSocketView.h"
 #include "core/BufferModel.h"
@@ -109,6 +110,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_programmer, &Programmer::chipIdFinished, this, &MainWindow::onChipIdFinished);
     connect(m_programmer, &Programmer::eraseFinished, this, &MainWindow::onEraseFinished);
     connect(m_programmer, &Programmer::writeFinished, this, &MainWindow::onWriteFinished);
+    connect(m_programmer, &Programmer::fusesAvailable, this, &MainWindow::onFusesAvailable);
+    connect(m_programmer, &Programmer::fusesRead, this, &MainWindow::onFusesRead);
+    connect(m_programmer, &Programmer::fuseWriteFinished, this, &MainWindow::onFuseWriteFinished);
     connect(m_programmer, &Programmer::error, this, &MainWindow::onProgrammerError);
     for (MemArea a : { MemArea::Code, MemArea::Data }) {
         connect(m_panes[a].buffer, &BufferModel::reset,
@@ -626,6 +630,15 @@ void MainWindow::buildUi()
     m_tabs->setTabVisible(m_panes[MemArea::Data].tabIndex, false);
     m_hex = m_panes[MemArea::Code].view;  // initial alias
 
+    // Fuses tab: hidden until a chip that exposes config fuses is opened.
+    m_fuseEditor = new FuseEditorWidget(this);
+    m_fuseTabIndex = m_tabs->addTab(m_fuseEditor, "Fuses");
+    m_tabs->setTabVisible(m_fuseTabIndex, false);
+    connect(m_fuseEditor, &FuseEditorWidget::readRequested,
+            m_programmer, &Programmer::readFuses);
+    connect(m_fuseEditor, &FuseEditorWidget::writeRequested,
+            this, &MainWindow::onFuseWriteRequested);
+
     m_zif = new ZifSocketView(this);
     split->addWidget(m_tabs);
     split->addWidget(m_zif);
@@ -824,6 +837,89 @@ void MainWindow::onChipOpenFailed(const QString &message)
     m_chipOpened = false;
     QMessageBox::warning(this, "Open chip failed", message);
     updateActions();
+}
+
+void MainWindow::onFusesAvailable(const FuseSet &fuses)
+{
+    m_fuseEditor->bindLayout(fuses);
+    if (m_fuseTabIndex < 0) return;
+    m_tabs->setTabVisible(m_fuseTabIndex, fuses.valid);
+    if (!fuses.valid && m_tabs->currentIndex() == m_fuseTabIndex)
+        m_tabs->setCurrentIndex(m_panes[MemArea::Code].tabIndex);
+}
+
+void MainWindow::onFusesRead(const FuseSet &fuses)
+{
+    m_fuseEditor->applyRead(fuses);
+    statusBar()->showMessage(
+        fuses.errorMessage.isEmpty()
+            ? QStringLiteral("Fuses read from chip.")
+            : ("Fuse read failed: " + fuses.errorMessage),
+        10000);
+}
+
+void MainWindow::onFuseWriteFinished(bool ok, bool verified, const QString &message)
+{
+    m_fuseEditor->setBusy(false);
+    if (!ok) {
+        QMessageBox::warning(this, "Write fuses failed", message);
+        statusBar()->showMessage("Fuse write failed.", 10000);
+        return;
+    }
+    if (!verified) {
+        QMessageBox::warning(this, "Fuse verify mismatch",
+            message.isEmpty()
+                ? "Fuses were written, but the read-back did not match."
+                : message);
+    } else {
+        statusBar()->showMessage("Fuses written and verified.", 8000);
+    }
+    // Re-read so the editor reflects exactly what's now on the chip.
+    m_programmer->readFuses();
+}
+
+void MainWindow::onFuseWriteRequested(const FuseSet &subset, bool locks)
+{
+    if (!m_chipOpened) return;
+    if (!subset.valid || subset.items.isEmpty()) {
+        QMessageBox::information(this, "Nothing to write",
+            "There are no values to write in this section.");
+        return;
+    }
+
+    QString list;
+    for (const FuseItem &it : subset.items)
+        list += QString("\n    %1 = 0x%2")
+                    .arg(it.name)
+                    .arg(it.value, (it.mask > 0xFF) ? 4 : 2, 16, QChar('0'));
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    if (locks) {
+        box.setWindowTitle("Write lock bits");
+        box.setText("About to write LOCK BITS to the chip.");
+        box.setInformativeText(
+            "Lock bits restrict reading and reprogramming, and can only be "
+            "cleared again by a full chip erase. Make sure you have a backup "
+            "of the chip's contents first.\n\nValues:" + list);
+    } else {
+        box.setWindowTitle("Write fuses");
+        box.setText("About to write configuration fuses to the chip.");
+        box.setInformativeText(
+            "Incorrect fuse settings — wrong clock source, or disabling "
+            "SPIEN / RSTDISBL — can make the chip unresponsive to the "
+            "programmer until recovered via high-voltage programming.\n\n"
+            "Values:" + list);
+    }
+    auto *writeBtn = box.addButton("Write", QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != static_cast<QAbstractButton *>(writeBtn))
+        return;
+
+    m_fuseEditor->setBusy(true);
+    m_programmer->writeFuses(subset);
 }
 
 void MainWindow::onReadClicked()

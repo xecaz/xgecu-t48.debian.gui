@@ -9,6 +9,7 @@
 
 class BufferModel;
 class ChipDatabase;
+class FuseEditorWidget;
 class HexView;
 class QAction;
 class QLabel;
@@ -46,6 +47,10 @@ private slots:
     void onEraseFinished(bool ok, const QString &message);
     void onWriteClicked();
     void onWriteFinished(const WriteResult &result);
+    void onFusesAvailable(const FuseSet &fuses);
+    void onFusesRead(const FuseSet &fuses);
+    void onFuseWriteFinished(bool ok, bool verified, const QString &message);
+    void onFuseWriteRequested(const FuseSet &subset, bool locks);
 
 private:
     void buildUi();
@@ -71,6 +76,8 @@ private:
 
     QHash<MemArea, AreaPane> m_panes;
     QTabWidget *m_tabs = nullptr;
+    FuseEditorWidget *m_fuseEditor = nullptr;
+    int m_fuseTabIndex = -1;
     // Active-tab convenience aliases; refreshed by onCurrentTabChanged so
     // every existing callsite that operates on "the current buffer / view"
     // keeps working without per-action plumbing.

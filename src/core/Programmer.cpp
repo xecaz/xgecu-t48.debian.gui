@@ -12,6 +12,7 @@ Programmer::Programmer(QObject *parent)
     qRegisterMetaType<VerifyResult>("VerifyResult");
     qRegisterMetaType<ChipIdResult>("ChipIdResult");
     qRegisterMetaType<WriteResult>("WriteResult");
+    qRegisterMetaType<FuseSet>("FuseSet");
     m_worker->moveToThread(&m_thread);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
 
@@ -25,6 +26,9 @@ Programmer::Programmer(QObject *parent)
     connect(m_worker, &ProgrammerWorker::chipIdFinished, this, &Programmer::chipIdFinished);
     connect(m_worker, &ProgrammerWorker::eraseFinished, this, &Programmer::eraseFinished);
     connect(m_worker, &ProgrammerWorker::writeFinished, this, &Programmer::writeFinished);
+    connect(m_worker, &ProgrammerWorker::fusesAvailable, this, &Programmer::fusesAvailable);
+    connect(m_worker, &ProgrammerWorker::fusesRead, this, &Programmer::fusesRead);
+    connect(m_worker, &ProgrammerWorker::fuseWriteFinished, this, &Programmer::fuseWriteFinished);
     connect(m_worker, &ProgrammerWorker::error, this, &Programmer::error);
 
     m_thread.start();
@@ -91,6 +95,17 @@ void Programmer::eraseChip(bool force)
 {
     QMetaObject::invokeMethod(m_worker, "eraseChip", Qt::QueuedConnection,
                               Q_ARG(bool, force));
+}
+
+void Programmer::readFuses()
+{
+    QMetaObject::invokeMethod(m_worker, "readFuses", Qt::QueuedConnection);
+}
+
+void Programmer::writeFuses(const FuseSet &fuses)
+{
+    QMetaObject::invokeMethod(m_worker, "writeFuses", Qt::QueuedConnection,
+                              Q_ARG(FuseSet, fuses));
 }
 
 void Programmer::requestCancel()

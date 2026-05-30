@@ -52,8 +52,8 @@ USB access on Debian 13: user must be in `plugdev` AND the minipro udev rules mu
 
 The worker API is **`MemArea`-parametric** (Code/Data):
 
-- Slots: `setInfoicPath`, `setLogicicPath`, `detect`, `openChip`, `readMemory(area)`, `verifyMemory(area, expected)`, `writeMemory(area, data, force, autoVerify)`, `eraseChip(force)`, `detectChipId`.
-- Signals: `detected(DeviceInfo)`, `chipOpened(name, codeSize, dataSize, canErase)`, `progress(done, total)`, `readFinished(ReadResult{area, data})`, `verifyFinished(VerifyResult{area, …})`, `writeFinished(WriteResult{area, …})`, `chipIdFinished`, `eraseFinished`, `error`.
+- Slots: `setInfoicPath`, `setLogicicPath`, `detect`, `openChip`, `readMemory(area)`, `verifyMemory(area, expected)`, `writeMemory(area, data, force, autoVerify)`, `eraseChip(force)`, `detectChipId`, `readFuses`, `writeFuses(FuseSet)`.
+- Signals: `detected(DeviceInfo)`, `chipOpened(name, codeSize, dataSize, canErase)`, `progress(done, total)`, `readFinished(ReadResult{area, data})`, `verifyFinished(VerifyResult{area, …})`, `writeFinished(WriteResult{area, …})`, `chipIdFinished`, `eraseFinished`, `fusesAvailable(FuseSet)`, `fusesRead(FuseSet)`, `fuseWriteFinished(ok, verified, msg)`, `error`.
 
 `MemArea::Code` maps to `MP_CODE`, `MemArea::Data` maps to `MP_DATA`. The word-organised address shift (`flags.data_org == MP_ORG_WORDS`) **only applies to code memory** — `verifyMemory` and `writeMemory` deliberately gate it on `area == MemArea::Code`.
 
@@ -106,6 +106,18 @@ For adapters (`adapter != 0`) and PLCC packages, the current widget shows a text
 - **Find** (`Edit > Find bytes…`, Ctrl+F): hex / ASCII / decimal mode picker with live byte-preview. F3 reuses the *parsed* bytes (no re-parsing). Wrap detection: distinguishes "Match", "Search wrapped — no more instances after cursor", and "Only one match".
 - **Go to offset** (Ctrl+G): decimal or `0x…` hex.
 
+## Fuse / config-bit editor (`FuseEditorWidget`)
+
+Third tab in the central `QTabWidget`, hidden until a chip exposes config fuses. `openChip` emits `fusesAvailable(FuseSet)` built from `(fuse_decl_t*)dev->config` (gated on `dev->config && dev->chip_type != MP_PLD && num_fuses+num_locks>0`); the MainWindow shows/hides the tab on that. One mask-aware hex field per declared fuse/lock item — **generic, driven entirely by minipro metadata**; no per-bit names (minipro carries only `{name, mask, default}`). Config fuses and lock bits are separate groups with **separate write buttons** (`onFuseWriteRequested(subset, locks)`), each behind a confirmation dialog; the lock-bits warning calls out that locks are only cleared by a full chip erase.
+
+Value representation — the subtle part, mirroring the minipro CLI:
+- minipro applies `value |= ~mask` to **both** fuses and locks on read, write, and verify. It does **not** trim to 8 bits when `word_size == 2`.
+- **The ATmega328P reports `word_size = 2`** (not 1), so a raw read of `lfuse` yields `0xFF62`. To keep the UI sane we present the **significant value** (`fuseSig`: `raw | ~mask`, then `& 0xFF` when `mask <= 0xFF`) → `0x62`, and display width follows the **mask**, not word_size (2 hex digits for `mask <= 0xFF`).
+- On write the worker reconstructs minipro's exact bytes with `fuseWire` (`sig | ~mask`) before `format_int` lays them down little-endian across `word_size` bytes — so a byte-wide fuse on this part writes `[0x62, 0xFF]`, identical to `minipro -w`.
+- Verify compares **by significant bits per item** (`fuseSig(readback) == fuseSig(written)`), never a raw `memcmp` — the chip can return out-of-mask bits differently, which would otherwise be a false mismatch. `lock_bit_write_only` parts skip lock read-back.
+
+The whole path is exercised read-only against live silicon by `readFusesFromAtmega328p` in the gated live harness.
+
 ## Safety / "live" testing
 
 The connected programmer has a real T48 plugged in. **Never run destructive operations without explicit user confirmation in this conversation.** Read-only operations safe in any phase: device-info, chip-ID read, code/data-memory read, verify, blank check. Erase / Write require interactive `QMessageBox` confirmation in the UI.
@@ -136,13 +148,16 @@ If the user has an original EEPROM in the socket without a backup, the rule is: 
 - ✅ Write code/data memory, strict size match, pre-write blank-probe + Force, optional auto-verify in the same transaction.
 - ✅ Editable `HexView` (cursor, selection, edit, undo, dirty highlight, Fill, Copy, Find, Goto).
 - ✅ Code / Data tabs with per-tab dirty marker.
+- ✅ Generic fuse / config + lock-bit editor (`FuseEditorWidget`), mask-aware, read/write/verify, separate lock write with warnings.
 - ✅ `.deb` packaging (debian/ tree + .desktop + SVG icon + udev rules).
 - ✅ Live-hardware test harness gated by `XGECU_LIVE_TESTS=1`.
+- ✅ ATmega328P verified on real silicon: detect, code/data round-trip, **and fuse read** all green in the live harness.
 
-## Not yet (paused — waiting on ATmega328P delivery)
+## Not yet
 
-- ATmega328P smoke test on real silicon: Detect chip ID returns `0x1E950F`, Code reads 32768 bytes, Data reads 1024 bytes, round-trip read/write/verify on both areas.
-- Fuse / config-bit editor. `device_t::config` already carries `fuse_decl_t` metadata, but doing it blind would be guesswork — needs an AVR/PIC in the loop. ATmega328P is the canonical test case (LFUSE/HFUSE/EFUSE/LOCK).
+- **Per-bit decode (CKDIV8 / SPIEN / BODLEVEL / BOOTRST …).** The editor is currently generic hex-per-fuse. Named-bit checkboxes would be friendlier but the bit-name tables are NOT in minipro — they'd be a UI-side lookup we'd maintain (gray area vs the "no custom chip definitions" rule). Deferred by choice.
+
+Verified on real silicon: the live fuse **write** round-trip (`fuseWriteRoundTripCkdiv8`, double-gated behind `XGECU_LIVE_FUSE_WRITE=1`) toggled CKDIV8 in LFUSE (`0x62`↔`0xE2`), confirmed read-back + that HFUSE/EFUSE stayed untouched, and restored the original. Note this chip's HFUSE reads `0xF9` (bootloader config); the T48 programs via HVPP so ISP/SPIEN state is irrelevant.
 
 ## Niche / on-demand (skip until needed)
 

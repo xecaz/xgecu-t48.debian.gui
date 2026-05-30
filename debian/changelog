@@ -1,3 +1,18 @@
+xgecu-gui (0.2.0-1) unstable; urgency=medium
+
+  * Add a generic fuse / config-bit editor (FuseEditorWidget) as a third tab,
+    shown when a chip exposes config fuses. Mask-aware hex fields, defaults,
+    read / write / verify, with config fuses and lock bits in separate groups
+    behind separate confirmation-gated write buttons.
+  * Fuse read/write/verify mirror the minipro CLI; present byte-wide fuses as
+    8-bit values even on word_size==2 parts (e.g. ATmega328P lfuse 0x62).
+  * HexView: copy the current address (right-click or Ctrl+Shift+C) in the
+    0x… form the Go-to / Fill / Copy dialogs accept.
+  * Verified on real silicon: ATmega328P fuse read and a CKDIV8 write
+    round-trip (gated live test).
+
+ -- Xecaz <xecaz@xecaz.com>  Sat, 30 May 2026 12:00:00 +0200
+
 xgecu-gui (0.1.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.

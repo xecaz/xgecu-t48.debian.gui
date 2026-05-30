@@ -24,6 +24,60 @@ QString modelName(int version)
     default:             return QString("unknown(%1)").arg(version);
     }
 }
+// minipro masks unused bits high (value |= ~mask) for fuses AND locks alike.
+// We keep the significant value for display: a byte-wide fuse (mask <= 0xFF)
+// is presented as 8 bits (e.g. lfuse 0x62), wider fuses as their full word.
+quint16 fuseSig(quint16 raw, quint16 mask)
+{
+    quint16 v = raw | static_cast<quint16>(~mask);
+    if (mask <= 0xFF)
+        v &= 0xFF;
+    return v;
+}
+
+// The exact bytes minipro writes: significant value with unused bits forced
+// high. format_int then lays this down little-endian across `word_size` bytes,
+// so a byte-wide fuse on a word_size==2 part writes e.g. [0x62, 0xFF].
+quint16 fuseWire(quint16 sig, quint16 mask)
+{
+    return sig | static_cast<quint16>(~mask);
+}
+
+// Build the declared fuse/lock layout from device->config (a fuse_decl_t).
+// Returns an invalid FuseSet for chips with no config section or PLDs.
+// Values are seeded to the manufacturer default until an actual read fills them.
+FuseSet fuseLayout(const device_t *dev)
+{
+    FuseSet set;
+    if (!dev || !dev->config || dev->chip_type == MP_PLD)
+        return set;
+    const auto *decl = reinterpret_cast<const fuse_decl_t *>(dev->config);
+    if (decl->num_fuses == 0 && decl->num_locks == 0)
+        return set;
+
+    set.wordSize = dev->flags.word_size ? dev->flags.word_size : 1;
+    set.lockReadable = !dev->flags.lock_bit_write_only;
+    for (uint8_t i = 0; i < decl->num_fuses && i < 16; ++i) {
+        FuseItem it;
+        it.name = QString::fromUtf8(decl->fuse[i].name);
+        it.mask = decl->fuse[i].mask;
+        it.def = fuseSig(decl->fuse[i].def, decl->fuse[i].mask);
+        it.value = it.def;
+        it.isLock = false;
+        set.items.append(it);
+    }
+    for (uint8_t i = 0; i < decl->num_locks && i < 4; ++i) {
+        FuseItem it;
+        it.name = QString::fromUtf8(decl->lock[i].name);
+        it.mask = decl->lock[i].mask;
+        it.def = fuseSig(decl->lock[i].def, decl->lock[i].mask);
+        it.value = it.def;
+        it.isLock = true;
+        set.items.append(it);
+    }
+    set.valid = !set.items.isEmpty();
+    return set;
+}
 }  // namespace
 
 ProgrammerWorker::ProgrammerWorker(QObject *parent) : QObject(parent)
@@ -106,6 +160,7 @@ void ProgrammerWorker::openChip(const QString &miniproName)
     m_currentChip = miniproName;
     emit chipOpened(miniproName, dev->code_memory_size, dev->data_memory_size,
                     static_cast<bool>(dev->flags.can_erase));
+    emit fusesAvailable(fuseLayout(dev));
 }
 
 namespace {
@@ -402,6 +457,180 @@ void ProgrammerWorker::eraseChip(bool force)
         return;
     }
     emit eraseFinished(true, QString());
+}
+
+void ProgrammerWorker::readFuses()
+{
+    FuseSet set;
+    if (!m_handle || !m_handle->device) {
+        set.errorMessage = "No chip selected.";
+        emit fusesRead(set);
+        return;
+    }
+    set = fuseLayout(m_handle->device);
+    if (!set.valid) {
+        set.errorMessage = "This chip has no configuration fuses.";
+        emit fusesRead(set);
+        return;
+    }
+    if (!m_handle->minipro_begin_transaction || !m_handle->minipro_end_transaction) {
+        set.errorMessage = "Programmer does not expose the fuse protocol.";
+        emit fusesRead(set);
+        return;
+    }
+
+    const size_t ws = set.wordSize;
+    int numFuses = 0, numLocks = 0;
+    for (const auto &it : set.items) (it.isLock ? numLocks : numFuses)++;
+
+    if (m_handle->minipro_begin_transaction(m_handle)) {
+        set.errorMessage = "begin_transaction failed";
+        emit fusesRead(set);
+        return;
+    }
+
+    uint8_t buffer[64] = {0};
+    bool ioError = false;
+
+    // Config-fuse section: mask unused bits high, mirroring the minipro CLI.
+    if (numFuses > 0) {
+        if (minipro_read_fuses(m_handle, MP_FUSE_CFG, numFuses * ws,
+                               static_cast<uint8_t>(numFuses), buffer)) {
+            ioError = true;
+        } else {
+            int idx = 0;
+            for (auto &it : set.items) {
+                if (it.isLock) continue;
+                const quint16 raw = static_cast<quint16>(
+                    load_int(&buffer[idx * ws], ws, MP_LITTLE_ENDIAN));
+                it.value = fuseSig(raw, it.mask);
+                ++idx;
+            }
+        }
+    }
+
+    // Lock section: items_count is word_size here (per the CLI). Skipped when
+    // the part's lock bits are write-only.
+    if (!ioError && numLocks > 0 && set.lockReadable) {
+        std::memset(buffer, 0, sizeof(buffer));
+        if (minipro_read_fuses(m_handle, MP_FUSE_LOCK, numLocks * ws,
+                               static_cast<uint8_t>(ws), buffer)) {
+            ioError = true;
+        } else {
+            int idx = 0;
+            for (auto &it : set.items) {
+                if (!it.isLock) continue;
+                const quint16 raw = static_cast<quint16>(
+                    load_int(&buffer[idx * ws], ws, MP_LITTLE_ENDIAN));
+                it.value = fuseSig(raw, it.mask);
+                ++idx;
+            }
+        }
+    }
+
+    m_handle->minipro_end_transaction(m_handle);
+    if (ioError)
+        set.errorMessage = "Reading fuses failed (I/O error).";
+    emit fusesRead(set);
+}
+
+void ProgrammerWorker::writeFuses(const FuseSet &fuses)
+{
+    if (!m_handle || !m_handle->device) {
+        emit fuseWriteFinished(false, false, "No chip selected.");
+        return;
+    }
+    if (!fuses.valid || fuses.items.isEmpty()) {
+        emit fuseWriteFinished(false, false, "Nothing to write.");
+        return;
+    }
+    if (!m_handle->minipro_begin_transaction || !m_handle->minipro_end_transaction) {
+        emit fuseWriteFinished(false, false,
+                               "Programmer does not expose the fuse protocol.");
+        return;
+    }
+
+    const size_t ws = fuses.wordSize ? fuses.wordSize : 1;
+    int numFuses = 0, numLocks = 0;
+    for (const auto &it : fuses.items) (it.isLock ? numLocks : numFuses)++;
+
+    if (m_handle->minipro_begin_transaction(m_handle)) {
+        emit fuseWriteFinished(false, false, "begin_transaction failed");
+        return;
+    }
+
+    uint8_t wbuf[64] = {0}, vbuf[64] = {0};
+    bool ioError = false;
+    bool verified = true;
+
+    // Compare a read-back buffer against the requested values, by significant
+    // bits — the chip may return unused (out-of-mask) bits differently, so a
+    // raw memcmp would falsely fail. Mirrors the minipro CLI's masked compare.
+    auto verifySection = [&](bool locks) {
+        int idx = 0;
+        for (const auto &it : fuses.items) {
+            if (it.isLock != locks) continue;
+            const quint16 back = static_cast<quint16>(
+                load_int(&vbuf[idx * ws], ws, MP_LITTLE_ENDIAN));
+            if (fuseSig(back, it.mask) != fuseSig(it.value, it.mask))
+                verified = false;
+            ++idx;
+        }
+    };
+
+    // Config-fuse section: write, then read back and compare.
+    if (numFuses > 0) {
+        int idx = 0;
+        for (const auto &it : fuses.items) {
+            if (it.isLock) continue;
+            format_int(&wbuf[idx * ws], fuseWire(it.value, it.mask), ws,
+                       MP_LITTLE_ENDIAN);
+            ++idx;
+        }
+        if (minipro_write_fuses(m_handle, MP_FUSE_CFG, numFuses * ws,
+                                static_cast<uint8_t>(numFuses), wbuf)) {
+            ioError = true;
+        } else if (minipro_read_fuses(m_handle, MP_FUSE_CFG, numFuses * ws,
+                                      static_cast<uint8_t>(numFuses), vbuf)) {
+            ioError = true;
+        } else {
+            verifySection(false);
+        }
+    }
+
+    // Lock section: items_count is word_size. Verify read-back only if readable.
+    if (!ioError && numLocks > 0) {
+        std::memset(wbuf, 0, sizeof(wbuf));
+        int idx = 0;
+        for (const auto &it : fuses.items) {
+            if (!it.isLock) continue;
+            format_int(&wbuf[idx * ws], fuseWire(it.value, it.mask), ws,
+                       MP_LITTLE_ENDIAN);
+            ++idx;
+        }
+        if (minipro_write_fuses(m_handle, MP_FUSE_LOCK, numLocks * ws,
+                                static_cast<uint8_t>(ws), wbuf)) {
+            ioError = true;
+        } else if (fuses.lockReadable) {
+            std::memset(vbuf, 0, sizeof(vbuf));
+            if (minipro_read_fuses(m_handle, MP_FUSE_LOCK, numLocks * ws,
+                                   static_cast<uint8_t>(ws), vbuf)) {
+                ioError = true;
+            } else {
+                verifySection(true);
+            }
+        }
+    }
+
+    m_handle->minipro_end_transaction(m_handle);
+
+    if (ioError) {
+        emit fuseWriteFinished(false, false, "Writing fuses failed (I/O error).");
+        return;
+    }
+    emit fuseWriteFinished(true, verified,
+        verified ? QString()
+                 : "Write completed, but read-back verify mismatched.");
 }
 
 void ProgrammerWorker::detectChipId()

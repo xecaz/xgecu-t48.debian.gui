@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "HexView.h"
 
+#include <QApplication>
+#include <QClipboard>
+#include <QContextMenuEvent>
 #include <QFontDatabase>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -15,6 +19,13 @@
 namespace {
 constexpr int kHGap = 12;
 constexpr int kVPad = 4;
+
+// Format an address as "0x7E00" — the same form the Go-to / Fill / Copy
+// dialogs parse, so copied text pastes straight back in.
+QString fmtAddr(qsizetype v)
+{
+    return QStringLiteral("0x") + QString::number(v, 16).toUpper();
+}
 
 class ByteEditCommand : public QUndoCommand {
 public:
@@ -416,6 +427,35 @@ void HexView::mouseMoveEvent(QMouseEvent *e)
     moveCursor(off, false, /*extendSelection=*/true);
 }
 
+void HexView::contextMenuEvent(QContextMenuEvent *e)
+{
+    if (!m_model || m_model->size() == 0) {
+        QAbstractScrollArea::contextMenuEvent(e);
+        return;
+    }
+    QMenu menu(this);
+
+    const QString addr = fmtAddr(m_cursorOffset);
+    QAction *copyAddr = menu.addAction(tr("Copy address  %1").arg(addr));
+    connect(copyAddr, &QAction::triggered, this,
+            [addr] { QApplication::clipboard()->setText(addr); });
+
+    if (hasSelection()) {
+        const QString start = fmtAddr(selectionStart());
+        const QString end = fmtAddr(selectionStart() + selectionLength() - 1);
+        QAction *copyStart =
+            menu.addAction(tr("Copy selection start  %1").arg(start));
+        connect(copyStart, &QAction::triggered, this,
+                [start] { QApplication::clipboard()->setText(start); });
+        QAction *copyEnd =
+            menu.addAction(tr("Copy selection end  %1").arg(end));
+        connect(copyEnd, &QAction::triggered, this,
+                [end] { QApplication::clipboard()->setText(end); });
+    }
+
+    menu.exec(e->globalPos());
+}
+
 void HexView::keyPressEvent(QKeyEvent *e)
 {
     if (!m_model || m_model->size() == 0) {
@@ -427,6 +467,14 @@ void HexView::keyPressEvent(QKeyEvent *e)
 
     if (e->matches(QKeySequence::Undo)) { m_undo.undo(); viewport()->update(); return; }
     if (e->matches(QKeySequence::Redo)) { m_undo.redo(); viewport()->update(); return; }
+
+    // Ctrl+Shift+C: copy the current cursor address to the clipboard.
+    if (e->key() == Qt::Key_C
+        && (e->modifiers() & Qt::ControlModifier)
+        && (e->modifiers() & Qt::ShiftModifier)) {
+        QApplication::clipboard()->setText(fmtAddr(m_cursorOffset));
+        return;
+    }
 
     const bool shift = (e->modifiers() & Qt::ShiftModifier);
     switch (e->key()) {

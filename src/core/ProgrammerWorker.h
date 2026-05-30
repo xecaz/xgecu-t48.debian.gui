@@ -31,6 +31,8 @@ public slots:
     void writeMemory(MemArea area, const QByteArray &data, bool force, bool autoVerify);
     void detectChipId();
     void eraseChip(bool force);
+    void readFuses();
+    void writeFuses(const FuseSet &fuses);
 
 signals:
     void detected(const DeviceInfo &info);
@@ -44,6 +46,9 @@ signals:
     void chipIdFinished(const ChipIdResult &result);
     void eraseFinished(bool ok, const QString &message);
     void writeFinished(const WriteResult &result);
+    void fusesAvailable(const FuseSet &fuses);
+    void fusesRead(const FuseSet &fuses);
+    void fuseWriteFinished(bool ok, bool verified, const QString &message);
     void error(const QString &message);
 
 private:
