@@ -15,6 +15,7 @@
 #include <QUndoCommand>
 
 #include "core/BufferModel.h"
+#include "ThemeManager.h"
 
 namespace {
 constexpr int kHGap = 12;
@@ -126,12 +127,23 @@ private:
 HexView::HexView(QWidget *parent) : QAbstractScrollArea(parent)
 {
     QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    f.setPointSize(10);
+    f.setPointSize(ThemeManager::instance().hexFontSize());
     setFont(f);
     viewport()->setBackgroundRole(QPalette::Base);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     setFocusPolicy(Qt::StrongFocus);
     m_undo.setUndoLimit(2000);
+    connect(&ThemeManager::instance(), &ThemeManager::changed,
+            this, &HexView::onThemeChanged);
+}
+
+void HexView::onThemeChanged()
+{
+    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    f.setPointSize(ThemeManager::instance().hexFontSize());
+    setFont(f);
+    updateScrollbars();  // row height tracks the font
+    viewport()->update();
 }
 
 void HexView::setModel(BufferModel *model)
@@ -572,7 +584,7 @@ void HexView::paintEvent(QPaintEvent *e)
     const QColor cursorFg = palette().highlightedText().color();
     const QColor nibbleBg = cursorBg.darker(140);
     QColor selBg = cursorBg; selBg.setAlpha(100);
-    const QColor dirtyFg(220, 50, 47);   // red for unsaved edits
+    const QColor dirtyFg = ThemeManager::instance().theme().dirtyByte;
 
     const bool sel = hasSelection();
     const qsizetype selA = sel ? qMin(m_anchor, m_cursorOffset) : -1;

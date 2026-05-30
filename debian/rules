@@ -4,10 +4,12 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
 %:
-	dh $@ --buildsystem=cmake
+	dh $@ --buildsystem=cmake+ninja
 
+# cmake+ninja already selects the Ninja generator and uses ninja to build,
+# so dh_auto_build matches dh_auto_configure (no Makefile/Ninja mismatch).
 override_dh_auto_configure:
-	dh_auto_configure -- -GNinja -DCMAKE_BUILD_TYPE=Release
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=Release
 
 # The minipro Makefile builds libminipro.a in third_party/minipro/src as a
 # side effect — that directory belongs to a submodule we don't own, so its

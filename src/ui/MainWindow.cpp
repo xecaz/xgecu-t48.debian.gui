@@ -37,6 +37,7 @@
 #include "ChipSelectDialog.h"
 #include "FuseEditorWidget.h"
 #include "HexView.h"
+#include "PreferencesDialog.h"
 #include "ZifSocketView.h"
 #include "core/BufferModel.h"
 #include "core/ChipDatabase.h"
@@ -136,6 +137,9 @@ void MainWindow::buildUi()
     auto *fileMenu = menuBar()->addMenu("&File");
     auto *openAct = fileMenu->addAction("&Open buffer…");
     auto *saveAct = fileMenu->addAction("&Save buffer…");
+    fileMenu->addSeparator();
+    fileMenu->addAction("&Preferences…", QKeySequence(QKeySequence::Preferences),
+                        this, &MainWindow::onPreferences);
     fileMenu->addSeparator();
     fileMenu->addAction("E&xit", QKeySequence::Quit, qApp, &QCoreApplication::quit);
 
@@ -538,7 +542,7 @@ void MainWindow::buildUi()
     m_eraseAct = deviceMenu->addAction("&Erase chip…");
     m_eraseAct->setShortcut(QKeySequence("Ctrl+E"));
     m_eraseAct->setEnabled(false);
-    m_writeAct = deviceMenu->addAction("&Write buffer to chip…");
+    m_writeAct = deviceMenu->addAction("&Write chip…");
     m_writeAct->setShortcut(QKeySequence("Ctrl+W"));
     m_writeAct->setEnabled(false);
 
@@ -741,6 +745,12 @@ void MainWindow::updateActions()
     m_writeAct->setToolTip(bufMatches
         ? "Write the current buffer to the chip."
         : QString("Load a buffer of exactly %1 bytes to enable Write.").arg(sz));
+}
+
+void MainWindow::onPreferences()
+{
+    PreferencesDialog dlg(this);
+    dlg.exec();
 }
 
 void MainWindow::onSelectChip()

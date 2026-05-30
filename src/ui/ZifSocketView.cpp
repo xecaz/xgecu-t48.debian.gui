@@ -7,10 +7,14 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ThemeManager.h"
+
 ZifSocketView::ZifSocketView(QWidget *parent) : QWidget(parent)
 {
     setMinimumSize(280, 700);
     setAutoFillBackground(true);
+    connect(&ThemeManager::instance(), &ThemeManager::changed,
+            this, qOverload<>(&QWidget::update));
 }
 
 void ZifSocketView::setChip(const ChipEntry *chip)
@@ -27,6 +31,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
+    const Theme &t = ThemeManager::instance().theme();
     const QRect r = rect().adjusted(8, 8, -8, -8);
 
     // Header line.
@@ -64,7 +69,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
                      yStart - bodyMargin,
                      (rightColX + pinW) - (leftColX) + 2 * bodyMargin,
                      totalH + 2 * bodyMargin);
-    QColor socketColor(60, 90, 120);
+    QColor socketColor = t.socketBody;
     p.setBrush(socketColor);
     p.setPen(QPen(socketColor.darker(150), 1.0));
     p.drawRoundedRect(socketBody, 8, 8);
@@ -78,7 +83,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         af.setBold(true);
         af.setPointSizeF(std::max(8.0, af.pointSizeF()));
         p.setFont(af);
-        p.setPen(QColor(220, 220, 230));
+        p.setPen(t.socketText);
         // arrow ↑
         QPainterPath arrow;
         arrow.moveTo(ax, ay + 14);
@@ -86,7 +91,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         arrow.moveTo(ax - 4, ay + 8);
         arrow.lineTo(ax, ay + 4);
         arrow.lineTo(ax + 4, ay + 8);
-        p.strokePath(arrow, QPen(QColor(220, 220, 230), 1.6));
+        p.strokePath(arrow, QPen(t.socketText, 1.6));
         p.drawText(QPoint(ax - 8, ay + 28), "IC");
         p.setFont(pf);
     }
@@ -103,7 +108,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
 
         // Stem (vertical rod).
         p.save();
-        p.setPen(QPen(QColor(40, 40, 50), 8, Qt::SolidLine, Qt::RoundCap));
+        p.setPen(QPen(t.leverStem, 8, Qt::SolidLine, Qt::RoundCap));
         p.drawLine(exitPt, stemEnd);
         p.restore();
 
@@ -113,10 +118,10 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         // Subtle radial highlight for depth.
         QRadialGradient rg(ballC.x() - ballR / 3.0, ballC.y() - ballR / 3.0,
                            ballR * 1.6);
-        rg.setColorAt(0.0, QColor(90, 90, 100));
-        rg.setColorAt(1.0, QColor(20, 20, 25));
+        rg.setColorAt(0.0, t.leverBallHi);
+        rg.setColorAt(1.0, t.leverBallLo);
         p.setBrush(rg);
-        p.setPen(QPen(QColor(10, 10, 15), 1.0));
+        p.setPen(QPen(t.leverBallOutline, 1.0));
         p.drawEllipse(ballC, ballR, ballR);
 
         p.setPen(palette().placeholderText().color());
@@ -151,14 +156,14 @@ void ZifSocketView::paintEvent(QPaintEvent *)
 
     p.setFont(pf);
 
-    QColor pinIdle(180, 180, 180);
-    QColor pinActive(60, 200, 120);
+    QColor pinIdle = t.pinIdle;
+    QColor pinActive = t.pinActive;
 
     for (int i = 1; i <= kPerSide; ++i) {
         const QRect L = zifLeftRect(i);
         const bool activeL = chipPins && i >= firstUsedLeft && i <= lastUsedLeft;
         p.setBrush(activeL ? pinActive : pinIdle);
-        p.setPen(Qt::black);
+        p.setPen(t.pinText);
         p.drawRect(L);
         p.drawText(L, Qt::AlignCenter, QString::number(i));
     }
@@ -166,7 +171,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         const QRect R = zifRightRect(i);
         const bool activeR = chipPins && i >= firstUsedRight && i <= kZifPins;
         p.setBrush(activeR ? pinActive : pinIdle);
-        p.setPen(Qt::black);
+        p.setPen(t.pinText);
         p.drawRect(R);
         p.drawText(R, Qt::AlignCenter, QString::number(i));
     }
@@ -179,7 +184,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
                        chipTop,
                        rightColX - (leftColX + pinW) - 4,
                        chipBot - chipTop);
-        QColor body(35, 35, 45, 230);
+        QColor body = t.chipBody;
         p.setBrush(body);
         p.setPen(QPen(body.lighter(180), 1.0));
         p.drawRoundedRect(chipBody, 4, 4);
@@ -189,7 +194,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         const int dotR = std::max(3, pinH / 4);
         QPoint pin1Center(chipBody.left() + dotR + 4,
                           chipBody.top() + dotR + 4);
-        p.setBrush(QColor(255, 220, 60));
+        p.setBrush(t.pin1Marker);
         p.setPen(Qt::NoPen);
         p.drawEllipse(pin1Center, dotR, dotR);
 
@@ -207,7 +212,7 @@ void ZifSocketView::paintEvent(QPaintEvent *)
         p.drawPath(notch);
 
         // Caption: "1" next to dot.
-        p.setPen(QColor(255, 220, 60));
+        p.setPen(t.pin1Marker);
         QFont cf = p.font();
         cf.setBold(true);
         p.setFont(cf);

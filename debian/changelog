@@ -1,3 +1,15 @@
+xgecu-gui (0.3.0-1) unstable; urgency=medium
+
+  * Add File → Preferences… dialog: pick a theme (Light / Dark / Hacker /
+    Amber) and set the UI and hex-editor font sizes independently. Changes
+    preview live and persist via QSettings; Cancel reverts.
+  * New ThemeManager applies a full palette (via the Fusion style) and feeds
+    accent colours to the custom-painted widgets, so themes recolour
+    everything including the ZIF socket and hex-editor dirty bytes.
+  * Rename the "Write buffer to chip…" action to "Write chip…".
+
+ -- Xecaz <xecaz@xecaz.com>  Sat, 30 May 2026 18:00:00 +0200
+
 xgecu-gui (0.2.0-1) unstable; urgency=medium
 
   * Add a generic fuse / config-bit editor (FuseEditorWidget) as a third tab,

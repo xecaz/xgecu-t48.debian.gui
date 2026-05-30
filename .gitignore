@@ -11,3 +11,12 @@ compile_commands.json
 .idea/
 .vscode/
 *.user
+
+# dpkg-buildpackage artifacts (binary .deb lands in the parent dir)
+/obj-*/
+/debian/.debhelper/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+/debian/xgecu-gui/

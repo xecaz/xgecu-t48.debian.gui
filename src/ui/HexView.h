@@ -54,6 +54,7 @@ protected:
 private slots:
     void onModelReset();
     void onModelChanged(qsizetype offset, qsizetype length);
+    void onThemeChanged();
 
 private:
     enum class Column { Hex, Ascii };

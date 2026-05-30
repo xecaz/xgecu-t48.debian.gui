@@ -12,6 +12,7 @@
 #include <QVBoxLayout>
 
 #include "core/ChipDatabase.h"
+#include "ThemeManager.h"
 
 namespace {
 constexpr int kRoleEntry = Qt::UserRole + 1;
@@ -119,7 +120,7 @@ ChipSelectDialog::ChipSelectDialog(ChipDatabase *db, QWidget *parent)
 void ChipSelectDialog::populate()
 {
     const QStringList manufs = m_db->manufacturers();
-    QColor unsupportedFg(160, 160, 160);
+    QColor unsupportedFg = ThemeManager::instance().theme().unsupportedText;
     for (const QString &m : manufs) {
         auto *manufItem = new QStandardItem(m);
         manufItem->setEditable(false);

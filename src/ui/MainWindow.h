@@ -29,6 +29,7 @@ protected:
 
 private slots:
     void onSelectChip();
+    void onPreferences();
     void onDetect();
     void onDetected(const DeviceInfo &info);
     void onDetectionFailed(const QString &message);
